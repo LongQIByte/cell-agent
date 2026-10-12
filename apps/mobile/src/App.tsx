@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   AppState,
   BackHandler,
+  Dimensions,
   Linking,
   PanResponder,
   Platform,
@@ -14,17 +15,21 @@ import {
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
-import type { Project, Session } from '@codex-remote/protocol';
-import { RemoteClient, websocketUrl, type Connection, type ClientState } from './client';
+import type { Project, RecentSession, Session } from '@codex-remote/protocol';
+import { RemoteClient, websocketUrl, type Connection } from './client';
 import { loadConnection, saveConnection, clearConnection, readCache, saveCache } from './storage';
 import { Projects } from './Projects';
 import { Settings } from './Settings';
 import { Chat } from './Chat';
 import { NewProject } from './NewProject';
 import { Icon } from './icons';
-import { palette } from './ui';
+import { UIProvider, useUI, useThemedStyles, type Palette } from './ui';
+import { SplitLayout } from './SplitLayout';
+import { mergeProjects, mergeRecentSessions } from './catalog-state';
+import { horizontalBackSwipe } from './navigation-gesture';
+import { useDeviceState } from './use-device-state';
 
-type Selected = { project: Project; session: Session };
+type Selected = { deviceId: string; project: Project | null; session: Session };
 function useViewportHeight() {
   const dimensions = useWindowDimensions();
   const [visualHeight, setVisualHeight] = useState<number | null>(null);
@@ -39,13 +44,28 @@ function useViewportHeight() {
   return visualHeight ?? dimensions.height;
 }
 function Main() {
+  const { palette, scheme } = useUI();
+  const styles = useThemedStyles(createStyles);
   const height = useViewportHeight();
+  const dimensions = useWindowDimensions();
+  const screen = Dimensions.get('screen');
+  const canSplit = dimensions.width >= 600 &&
+    (Platform.OS === 'web' || Math.min(screen.width, screen.height) >= 600);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [booted, setBooted] = useState(false);
   const [connection, setConnection] = useState<Connection | null>(null);
   const [tab, setTab] = useState<'projects' | 'settings'>('projects');
-  const [state, setState] = useState<ClientState>({ status: 'disconnected', devices: [] });
+  const [state, setState] = useDeviceState(connection?.server);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [recentSessions, setRecentSessions] = useState<RecentSession[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [archived, setArchived] = useState(false);
+  const [archivingId, setArchivingId] = useState<string | null>(null);
+  const [archiveError, setArchiveError] = useState('');
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const collapseLoaded = useRef(false);
+  const pendingCollapse = useRef(new Map<string, boolean>());
   const [error, setError] = useState('');
   const [selected, setSelected] = useState<Selected | null>(null);
   const [newProject, setNewProject] = useState(false);
@@ -56,9 +76,15 @@ function Main() {
   );
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const refreshInProgress = useRef(false);
+  const refreshAgain = useRef(false);
+  const catalogLoaded = useRef(false);
   const currentClient = useRef(client);
   currentClient.current = client;
-  const cacheKey = `catalog:${connection?.server ?? 'none'}`;
+  const cacheKey = `native-catalog:${connection?.server ?? 'none'}:${archived ? 'archived' : 'active'}`;
+  const collapseKey = `collapsed-projects:${connection?.server ?? 'none'}`;
+  const currentCatalog = useRef(cacheKey);
+  currentCatalog.current = cacheKey;
+  const catalogGeneration = useRef(0);
   async function applyPairingLink(url: string) {
     let parsed: URL;
     try {
@@ -85,8 +111,10 @@ function Main() {
           const saved = await loadConnection();
           if (alive) setConnection(saved);
         }
-        if (Platform.OS === 'web' && window.history.state?.selected && alive)
-          setSelected(window.history.state.selected);
+        if (Platform.OS === 'web' && alive) {
+          const value = window.history.state?.selected;
+          if (value?.deviceId && value?.session?.id) setSelected(value);
+        }
       } catch {
         /* A missing persisted connection should still open Projects. */
       } finally {
@@ -101,83 +129,142 @@ function Main() {
       subscription.remove();
     };
   }, []);
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (manual = false) => {
     const target = client;
-    if (!target || target.state.status !== 'connected' || refreshInProgress.current) return;
+    if (!target || target.state.status !== 'connected') return;
+    const generation = catalogGeneration.current;
+    if (refreshInProgress.current) {
+      refreshAgain.current = true;
+      if (manual) setRefreshing(true);
+      return;
+    }
     refreshInProgress.current = true;
-    setRefreshing(true);
-    setError('');
+    setRefreshing(manual);
+    setLoading(!catalogLoaded.current);
     const online = target.state.devices.filter((d) => d.online);
     try {
       const results = await Promise.allSettled(
         online.map((device) =>
-          target.request<{ projects: Project[] }>('projects/list', {}, device.id),
+          target.request<{ projects: Project[]; recentSessions: RecentSession[] }>('projects/list', { archived }, device.id),
         ),
       );
-      if (currentClient.current !== target) return;
+      if (currentClient.current !== target || currentCatalog.current !== cacheKey || catalogGeneration.current !== generation) return;
+      catalogLoaded.current = true;
       const succeeded = new Set<string>();
       const incoming: Project[] = [];
+      const incomingRecent: RecentSession[] = [];
       const errors: string[] = [];
       results.forEach((result, index) => {
         if (result.status === 'fulfilled') {
           succeeded.add(online[index].id);
           incoming.push(...result.value.projects);
+          incomingRecent.push(...result.value.recentSessions);
         } else errors.push(`${online[index].name}：${result.reason?.message ?? '读取失败'}`);
       });
-      setProjects((previous) => {
-        const next = [...previous.filter((p) => !succeeded.has(p.deviceId)), ...incoming];
-        void saveCache(cacheKey, { projects: next, devices: target.state.devices }).catch(() => {});
-        return next;
-      });
+      setProjects((previous) => mergeProjects(previous, incoming, succeeded));
+      setRecentSessions((previous) => mergeRecentSessions(previous, incomingRecent, succeeded));
       setError(errors.join('\n'));
     } finally {
-      if (currentClient.current === target) {
+      if (currentClient.current === target && currentCatalog.current === cacheKey && catalogGeneration.current === generation) {
         refreshInProgress.current = false;
         setRefreshing(false);
+        setLoading(false);
+        if (refreshAgain.current) {
+          refreshAgain.current = false;
+          void currentRefresh.current();
+        }
       }
     }
-  }, [client, cacheKey]);
+  }, [client, cacheKey, archived]);
+  const currentRefresh = useRef(refresh);
+  currentRefresh.current = refresh;
   useEffect(() => {
     let alive = true;
+    catalogGeneration.current += 1;
     setProjects([]);
+    setRecentSessions([]);
     setError('');
+    setArchiveError('');
+    setArchivingId(null);
+    setRefreshing(false);
+    setLoading(false);
     refreshInProgress.current = false;
-    void readCache<{ projects: Project[]; devices: ClientState['devices'] }>(cacheKey)
+    refreshAgain.current = false;
+    catalogLoaded.current = false;
+    void readCache<{ projects: Project[]; recentSessions: RecentSession[] }>(cacheKey)
       .then((cached) => {
-        if (alive && cached) {
+        if (alive && cached && !catalogLoaded.current) {
           setProjects((previous) => (previous.length ? previous : cached.projects));
-          if (!client || client.state.status !== 'connected')
-            setState((previous) => ({
-              ...previous,
-              devices: cached.devices.map((d) => ({ ...d, online: false })),
-            }));
+          setRecentSessions((previous) => (previous.length ? previous : cached.recentSessions));
         }
       })
       .catch(() => {});
     return () => {
       alive = false;
     };
-  }, [cacheKey]);
+  }, [cacheKey, client]);
   useEffect(() => {
+    if (catalogLoaded.current) {
+      void saveCache(cacheKey, { projects, recentSessions }).catch(() => {});
+    }
+  }, [cacheKey, projects, recentSessions]);
+  useEffect(() => {
+    let alive = true;
+    collapseLoaded.current = false;
+    pendingCollapse.current.clear();
+    setCollapsed(new Set());
+    void readCache<string[]>(collapseKey).then((saved) => {
+      if (!alive) return;
+      const next = new Set(saved ?? []);
+      for (const [key, closed] of pendingCollapse.current) {
+        if (closed) next.add(key);
+        else next.delete(key);
+      }
+      pendingCollapse.current.clear();
+      setCollapsed(next);
+      collapseLoaded.current = true;
+    }).catch(() => { if (alive) collapseLoaded.current = true; });
+    return () => { alive = false; };
+  }, [collapseKey]);
+  const toggleProject = useCallback((project: Project) => {
+    setCollapsed((previous) => {
+      const next = new Set(previous);
+      const key = `${connection?.server}:${project.deviceId}:${project.id}`;
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      if (!collapseLoaded.current) pendingCollapse.current.set(key, next.has(key));
+      return next;
+    });
+  }, [connection?.server]);
+  useEffect(() => {
+    if (collapseLoaded.current) void saveCache(collapseKey, [...collapsed]).catch(() => {});
+  }, [collapsed, collapseKey]);
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+  useEffect(() => {
+    setCreatingId(null);
     if (!client) {
       setState({ status: 'disconnected', devices: [] });
       return;
     }
+    let connected = false;
     const offState = client.onState((next) => {
       setState(next);
-      if (next.status === 'connected') void refresh();
+      if (next.status === 'connected' && !connected) void currentRefresh.current();
+      connected = next.status === 'connected';
     });
     const offEvents = client.onEvent((event) => {
       if (event.method === 'catalog/changed' || event.method === 'devices/changed') {
         clearTimeout(refreshTimer.current);
-        refreshTimer.current = setTimeout(() => void refresh(), 350);
+        refreshTimer.current = setTimeout(() => void currentRefresh.current(), 350);
       }
     });
     client.connect();
     const subscription = AppState.addEventListener('change', (next) => {
       if (next === 'active') {
         client.connect();
-        void refresh();
+        void currentRefresh.current();
       }
     });
     return () => {
@@ -187,19 +274,24 @@ function Main() {
       clearTimeout(refreshTimer.current);
       client.disconnect();
     };
-  }, [client, refresh]);
+  }, [client]);
   useEffect(() => {
-    if (selected) return;
-    const timer = setInterval(() => void refresh(), 20000);
+    if ((selected && !(canSplit && sidebarOpen)) || tab !== 'projects') return;
+    const timer = setInterval(() => {
+      if (AppState.currentState !== 'background' && AppState.currentState !== 'inactive') void refresh();
+    }, 20000);
     return () => clearInterval(timer);
-  }, [selected, refresh]);
+  }, [selected, canSplit, sidebarOpen, tab, refresh]);
   const goBack = useCallback(() => {
+    setSelected(null);
     if (Platform.OS === 'web' && window.history.state?.selected) window.history.back();
-    else setSelected(null);
   }, []);
   useEffect(() => {
     if (Platform.OS === 'web') {
-      const pop = (event: PopStateEvent) => setSelected(event.state?.selected ?? null);
+      const pop = (event: PopStateEvent) => {
+        const value = event.state?.selected;
+        setSelected(value?.deviceId && value?.session?.id ? value : null);
+      };
       const key = (event: KeyboardEvent) => {
         if (event.key === 'Escape' && selected && !newProject) goBack();
       };
@@ -227,43 +319,88 @@ function Main() {
     () =>
       PanResponder.create({
         onMoveShouldSetPanResponder: (_, gesture) =>
-          Platform.OS === 'ios' &&
           !!selected &&
-          gesture.x0 < 24 &&
-          gesture.dx > 24 &&
-          Math.abs(gesture.dy) < 35,
+          !newProject &&
+          gesture.y0 < height - 160 &&
+          horizontalBackSwipe(gesture.dx, gesture.dy, 40),
         onPanResponderRelease: (_, gesture) => {
-          if (gesture.dx > 85) goBack();
+          if (horizontalBackSwipe(gesture.dx, gesture.dy, 120)) goBack();
         },
+        onPanResponderTerminationRequest: () => true,
+        onShouldBlockNativeResponder: () => false,
       }),
-    [selected, goBack],
+    [selected, newProject, height, goBack],
   );
   function open(project: Project, session: Session) {
-    const value = { project, session };
+    openSelection({ deviceId: project.deviceId, project, session });
+  }
+  function openRecent(entry: RecentSession) {
+    openSelection({ deviceId: entry.deviceId, project: null, session: entry.session });
+  }
+  function openSelection(value: Selected) {
     setSelected(value);
-    if (Platform.OS === 'web')
-      window.history.pushState(
-        { selected: value },
-        '',
-        `#session=${encodeURIComponent(session.id)}`,
-      );
+    setTab('projects');
+    if (Platform.OS === 'web') {
+      const url = `#session=${encodeURIComponent(value.session.id)}`;
+      if (window.history.state?.selected) window.history.replaceState({ selected: value }, '', url);
+      else window.history.pushState({ selected: value }, '', url);
+    }
   }
   async function createSession(project: Project) {
     if (!client || creatingId) return;
+    const target = client;
     setCreatingId(`${project.deviceId}:${project.id}`);
     setError('');
     try {
-      const { session } = await client.request<{ session: Session }>(
+      const { session } = await target.request<{ session: Session }>(
         'sessions/create',
         { projectId: project.id },
         project.deviceId,
       );
-      open(project, session);
-      void refresh();
+      if (currentClient.current === target) {
+        open(project, session);
+        void currentRefresh.current();
+      }
     } catch (e) {
-      setError((e as Error).message);
+      if (currentClient.current === target) setError((e as Error).message);
     } finally {
-      setCreatingId(null);
+      if (currentClient.current === target) setCreatingId(null);
+    }
+  }
+  async function archive(project: Project) {
+    if (!client || archivingId) return;
+    const target = client;
+    setArchivingId(`${project.deviceId}:${project.id}`);
+    setArchiveError('');
+    try {
+      await target.request(
+        'projects/archive',
+        { projectId: project.id, threadIds: project.sessions.map((item) => item.id) },
+        project.deviceId,
+      );
+    } catch (e) {
+      if (currentClient.current === target) setArchiveError((e as Error).message);
+    } finally {
+      if (currentClient.current === target) {
+        setArchivingId(null);
+        void currentRefresh.current();
+      }
+    }
+  }
+  async function archiveSession(deviceId: string, session: Session, restore = false) {
+    if (!client || archivingId) return;
+    const target = client;
+    setArchivingId(`${deviceId}:${session.id}`);
+    setArchiveError('');
+    try {
+      await target.request(restore ? 'sessions/unarchive' : 'sessions/archive', { threadId: session.id }, deviceId);
+    } catch (e) {
+      if (currentClient.current === target) setArchiveError((e as Error).message);
+    } finally {
+      if (currentClient.current === target) {
+        setArchivingId(null);
+        void currentRefresh.current();
+      }
     }
   }
   if (!booted)
@@ -274,28 +411,33 @@ function Main() {
     );
   return (
     <View style={[styles.root, { height }]}>
-      <StatusBar style="dark" backgroundColor="white" />
-      {selected ? (
-        <SafeAreaView edges={['top', 'left', 'right']} style={{ flex: 1 }} {...swipe.panHandlers}>
-          <Chat
-            key={`${connection?.server}:${selected.project.deviceId}:${selected.session.id}`}
-            project={selected.project}
-            session={selected.session}
-            client={client}
-            clientState={state}
-            server={connection?.server ?? ''}
-          />
-        </SafeAreaView>
-      ) : (
-        <SafeAreaView style={{ flex: 1 }}>
-          {tab === 'projects' ? (
-            <Projects
+      <StatusBar style={scheme === 'dark' ? 'light' : 'dark'} backgroundColor={palette.background} />
+      <SafeAreaView
+        edges={selected ? ['top', 'left', 'right'] : ['top', 'bottom', 'left', 'right']}
+        style={{ flex: 1 }}
+      >
+        <SplitLayout
+          split={!!selected && canSplit && sidebarOpen}
+          projectHidden={(!!selected && !(canSplit && sidebarOpen)) || (!selected && tab !== 'projects')}
+          project={<Projects
               projects={projects}
+              recentSessions={recentSessions}
               state={state}
               refreshing={refreshing}
-              error={error}
+              loading={loading}
+              archived={archived}
+              archivingId={archivingId}
+              collapsed={collapsed}
+              onToggle={toggleProject}
+              collapsePrefix={connection?.server ?? ''}
+              compact={!!selected && canSplit && sidebarOpen}
+              error={[error, archiveError].filter(Boolean).join('\n')}
               creatingId={creatingId}
-              onRefresh={refresh}
+              onRefresh={() => void refresh(true)}
+              onArchivedChange={setArchived}
+              onArchive={archive}
+              onArchiveSession={(deviceId, session) => void archiveSession(deviceId, session)}
+              onRestoreSession={(deviceId, session) => void archiveSession(deviceId, session, true)}
               onSettings={() => setTab('settings')}
               onCreateProject={() => {
                 if (!client || !state.devices.some((d) => d.online)) setTab('settings');
@@ -303,10 +445,38 @@ function Main() {
               }}
               onCreateSession={createSession}
               onOpen={open}
-            />
-          ) : (
+              onOpenRecent={openRecent}
+            />}
+        >
+          {selected ? (
+            <View style={styles.chatPanel} testID="session-panel" {...swipe.panHandlers}>
+              {canSplit && (
+                <View style={styles.splitControls}>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={sidebarOpen ? '收起项目栏' : '显示项目栏'}
+                    accessibilityState={{ expanded: sidebarOpen }}
+                    onPress={() => setSidebarOpen((previous) => !previous)}
+                    style={styles.splitButton}
+                  >
+                    <Icon name="projects" size={18} color={palette.secondary} />
+                    <Text style={styles.splitText}>{sidebarOpen ? '收起项目' : '显示项目'}</Text>
+                  </Pressable>
+                </View>
+              )}
+              <Chat
+                key={`${connection?.server}:${selected.deviceId}:${selected.session.id}`}
+                project={selected.project}
+                deviceId={selected.deviceId}
+                session={selected.session}
+                client={client}
+                clientState={state}
+                server={connection?.server ?? ''}
+              />
+            </View>
+          ) : tab === 'settings' ? (
             <Settings
-              key={`${connection?.server}:${connection?.token}`}
+              key={connection?.server ?? 'none'}
               connection={connection}
               state={state}
               client={client}
@@ -322,8 +492,9 @@ function Main() {
                 setConnection(null);
               }}
             />
-          )}
-          <View style={styles.tabs} testID="bottom-tabs">
+          ) : null}
+        </SplitLayout>
+        {!selected && <View style={styles.tabs} testID="bottom-tabs">
             {(['projects', 'settings'] as const).map((value) => (
               <Pressable
                 key={value}
@@ -333,15 +504,14 @@ function Main() {
                 onPress={() => setTab(value)}
                 style={styles.tab}
               >
-                <Icon name={value} size={20} color={tab === value ? palette.ink : '#aaa'} />
+                <Icon name={value} size={20} color={tab === value ? palette.ink : palette.muted} />
                 <Text style={[styles.tabText, tab === value && { color: palette.ink }]}>
                   {value === 'projects' ? 'Projects' : 'Settings'}
                 </Text>
               </Pressable>
             ))}
-          </View>
-        </SafeAreaView>
-      )}
+          </View>}
+      </SafeAreaView>
       {newProject && client && (
         <NewProject
           devices={state.devices}
@@ -359,19 +529,25 @@ function Main() {
 export default function App() {
   return (
     <SafeAreaProvider>
-      <Main />
+      <UIProvider>
+        <Main />
+      </UIProvider>
     </SafeAreaProvider>
   );
 }
-const styles = StyleSheet.create({
-  root: { backgroundColor: 'white', width: '100%', flex: 1 },
+const createStyles = (palette: Palette) => StyleSheet.create({
+  root: { backgroundColor: palette.background, width: '100%', flex: 1 },
+  chatPanel: { flex: 1, minWidth: 0, minHeight: 0 },
+  splitControls: { paddingHorizontal: 12, paddingTop: 4, paddingBottom: 2 },
+  splitButton: { flexDirection: 'row', alignItems: 'center', gap: 7, padding: 8, alignSelf: 'flex-start' },
+  splitText: { fontSize: 13, color: palette.secondary },
   tabs: {
     flexDirection: 'row',
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: '#e8e8e8',
+    borderTopColor: palette.line,
     minHeight: 66,
-    backgroundColor: 'white',
+    backgroundColor: palette.background,
   },
   tab: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingVertical: 11, gap: 5 },
-  tabText: { color: '#aaa', fontSize: 11 },
+  tabText: { color: palette.muted, fontSize: 11 },
 });

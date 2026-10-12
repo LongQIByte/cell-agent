@@ -15,6 +15,9 @@ apps/mobile/ios/
 artifacts/*.apk
 artifacts/*.apk.sha256
 artifacts/*.png
+artifacts/codex-remote-service/
+artifacts/*.zip
+artifacts/*.zip.sha256
 *.keystore
 *.jks
 *.pem
@@ -22,3 +25,4 @@ artifacts/*.png
 test-results/
 playwright-report/
 .playwright-cli/
+.playwright-mcp/

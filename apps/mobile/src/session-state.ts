@@ -44,6 +44,11 @@ export function applySessionEvent(
       next.items = state.items.map((i) =>
         i.turnId === p.turnId && i.status === 'inProgress' ? { ...i, status: p.status } : i,
       );
+  } else if (event.method === 'session/settings') {
+    next.model = p.model;
+    next.reasoningEffort = p.reasoningEffort;
+    next.permissions = p.permissions;
+    next.permissionsUnavailableReason = p.permissionsUnavailableReason;
   } else if (event.method === 'session/request') {
     next.requests = [
       ...state.requests.filter((r) => r.id !== p.request.id),

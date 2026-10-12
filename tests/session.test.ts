@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, mkdir, readFile, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SessionHistory, WireMessage } from '@codex-remote/protocol';
@@ -13,7 +13,10 @@ import { applySessionEvent } from '../apps/mobile/src/session-state.js';
 
 test('snapshot and streaming updates converge without duplicate tokens after reconnect', () => {
   const state: SessionHistory = {
-    session: { id: 'thread', projectId: 'p', name: 'Test', updatedAt: 0, status: 'idle' },
+    session: { id: 'thread', projectId: 'p', cwd: '/workspace', name: 'Test', updatedAt: 0, status: 'idle' },
+    model: 'test-model',
+    reasoningEffort: null,
+    permissions: null,
     items: [{ id: 'item', turnId: 'turn', kind: 'assistant', text: 'Hello', timestamp: 0 }],
     requests: [],
     activeTurnId: 'turn',
@@ -48,10 +51,15 @@ test('snapshot and streaming updates converge without duplicate tokens after rec
     'Hello world',
   );
 });
-test('attachments stay in the selected project, and replaying a message never creates a second Codex turn', async () => {
+test('projectless attachments stay in the exact session, and replaying a message never creates a second Codex turn', async () => {
   const root = await mkdtemp(join(tmpdir(), 'codex-remote-'));
-  const workspace = join(root, 'workspace');
-  await mkdir(workspace);
+  await mkdir(join(root, 'workspace'));
+  const workspace = await realpath(join(root, 'workspace'));
+  const other = join(root, 'other');
+  const outside = join(root, 'outside');
+  await mkdir(other);
+  await mkdir(outside);
+  await symlink(outside, join(other, '.codex-remote'));
   class FakeCodex extends EventEmitter {
     ready = Promise.resolve();
     starts = 0;
@@ -60,9 +68,13 @@ test('attachments stay in the selected project, and replaying a message never cr
       if (method === 'thread/list') return { data: [], nextCursor: null };
       if (method === 'thread/read' || method === 'thread/resume')
         return {
+          model: 'model-a', reasoningEffort: 'low', approvalPolicy: 'never',
+          sandbox: { type: 'dangerFullAccess' }, approvalsReviewer: 'user', activePermissionProfile: null,
+          runtimeWorkspaceRoots: [params.threadId === 'other' ? other : workspace],
           thread: {
-            id: 'thread',
-            cwd: workspace,
+            id: params.threadId,
+            cwd: params.threadId === 'other' ? other : workspace,
+            projectId: null,
             name: 'Test',
             createdAt: 1,
             updatedAt: 1,
@@ -81,19 +93,16 @@ test('attachments stay in the selected project, and replaying a message never cr
   }
   const fake = new FakeCodex();
   const store = new AgentStore(':memory:');
-  const service = new AgentService(fake as unknown as CodexRpc, store, 'machine');
+  const service = new AgentService(fake as unknown as CodexRpc, store, 'machine', join(root, 'codex-home'));
   try {
-    const { project } = (await service.handle('projects/create', {
-      name: 'Test',
-      path: workspace,
-    })) as any;
     const { file } = (await service.handle('attachments/upload', {
-      projectId: project.id,
+      threadId: 'thread',
       name: '../../note.txt',
       mimeType: 'text/plain',
       data: Buffer.from('attachment').toString('base64'),
     })) as any;
     const row = store.attachment(file.id)!;
+    assert.equal(row.thread_id, 'thread');
     assert.equal(row.name, 'note.txt');
     assert.ok(row.path.startsWith(workspace + '/'));
     assert.equal(await readFile(row.path, 'utf8'), 'attachment');
@@ -115,23 +124,14 @@ test('attachments stay in the selected project, and replaying a message never cr
     )!;
     assert.equal(display.text, 'hello');
     assert.deepEqual(display.attachments, ['note.txt']);
-    const other = join(root, 'other');
-    const outside = join(root, 'outside');
-    await mkdir(other);
-    await mkdir(outside);
-    await symlink(outside, join(other, '.codex-remote'));
-    const otherProject = (await service.handle('projects/create', {
-      name: 'Other',
-      path: other,
-    })) as any;
     await assert.rejects(
       service.handle('attachments/upload', {
-        projectId: otherProject.project.id,
+        threadId: 'other',
         name: 'no.txt',
         mimeType: 'text/plain',
         data: 'eA==',
       }),
-      /附件目录不能指向项目之外/,
+      /附件目录不能指向会话工作目录之外/,
     );
     await assert.rejects(readFile(join(outside, 'attachments')), { code: 'ENOENT' });
     await assert.rejects(
@@ -142,6 +142,16 @@ test('attachments stay in the selected project, and replaying a message never cr
       }),
       /附件不存在/,
     );
+    // A shared cwd does not authorize another chat to use this chat's attachment.
+    await assert.rejects(
+      service.handle('sessions/send', {
+        ...message,
+        threadId: 'same-cwd-thread',
+        idempotencyKey: 'another-session',
+      }),
+      /附件不存在或不属于此会话/,
+    );
+    assert.equal(fake.starts, 1);
   } finally {
     service.close();
     await rm(root, { recursive: true, force: true });

@@ -89,6 +89,10 @@ async function connect() {
     ws.on('close', (code) => {
       clearTimeout(authenticate);
       if (stopping) return;
+      if (code === 4002) {
+        console.error('[agent] Protocol mismatch: update phone app and restart computer service');
+        return;
+      }
       if (code === 4001 || code === 4009)
         console.error(
           `[agent] Relay rejected connection (${code}); check key / duplicate device ID`,

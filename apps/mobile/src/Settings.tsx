@@ -1,7 +1,12 @@
 import React, { useState } from 'react';
-import { Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { RemoteClient, websocketUrl, type ClientState, type Connection } from './client';
-import { Button, common, palette } from './ui';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import type { RemoteClient, ClientState, Connection } from './client';
+import { Button, useUI, useThemedStyles, type Palette } from './ui';
+import { GeneralSettings } from './GeneralSettings';
+import { ConnectionForm } from './ConnectionForm';
+import { DeviceConnectionDetail } from './DeviceConnectionDetail';
+import { computerStatus } from './connection-state';
+import { Icon } from './icons';
 export function Settings({
   connection,
   state,
@@ -15,33 +20,10 @@ export function Settings({
   onSave: (connection: Connection) => Promise<void>;
   onDisconnect: () => void;
 }) {
-  const [server, setServer] = useState(
-    connection?.server ?? (Platform.OS === 'web' ? window.location.origin : ''),
-  );
-  const [token, setToken] = useState(connection?.token ?? '');
-  const [showKey, setShowKey] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  async function save() {
-    setError('');
-    setBusy(true);
-    try {
-      const url = websocketUrl(server);
-      if (token.trim().length < 16) throw new Error('请输入电脑服务生成的完整配对密钥');
-      await onSave({ server: url, token: token.trim() });
-    } catch (error) {
-      setError((error as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-  const status = {
-    connected: '已连接',
-    connecting: '连接中…',
-    reconnecting: '重新连接中…',
-    disconnected: '未连接',
-    error: '连接失败',
-  }[state.status];
+  const { palette, common } = useUI();
+  const styles = useThemedStyles(createStyles);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
+  const selectedDevice = state.devices.find((device) => device.id === selectedDeviceId);
   return (
     <View style={common.page} testID="settings-screen">
       <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 40 }}>
@@ -50,79 +32,27 @@ export function Settings({
             Settings
           </Text>
           <Text style={common.subtitle}>让电脑上的 Codex，随身可用。</Text>
+          <GeneralSettings />
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>连接</Text>
             <Text style={styles.help}>
               手机与电脑连接同一局域网。在电脑启动服务后，填写服务地址与配对密钥。
             </Text>
-            <View style={{ marginTop: 28 }}>
-              <Text style={common.label}>服务地址</Text>
-              <TextInput
-                accessibilityLabel="服务地址"
-                autoCapitalize="none"
-                autoCorrect={false}
-                keyboardType="url"
-                value={server}
-                onChangeText={setServer}
-                placeholder="ws://192.168.0.5:8787"
-                placeholderTextColor="#aaa"
-                style={common.field}
-              />
-            </View>
-            <View style={{ marginTop: 26 }}>
-              <View style={styles.keyHeading}>
-                <Text style={[common.label, { marginBottom: 0 }]}>配对密钥</Text>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={showKey ? '隐藏密钥' : '显示密钥'}
-                  onPress={() => setShowKey(!showKey)}
-                  hitSlop={10}
-                >
-                  <Text style={styles.showKey}>{showKey ? '隐藏' : '显示'}</Text>
-                </Pressable>
-              </View>
-              <TextInput
-                accessibilityLabel="配对密钥"
-                autoCapitalize="none"
-                autoCorrect={false}
-                value={token}
-                onChangeText={setToken}
-                secureTextEntry={!showKey}
-                placeholder="电脑服务生成的密钥"
-                placeholderTextColor="#aaa"
-                style={common.field}
-              />
-            </View>
-            {!!error && <Text style={[common.error, { marginTop: 16 }]}>{error}</Text>}
-            <Button
-              label={busy ? '保存中…' : '保存并连接'}
-              onPress={save}
-              disabled={busy}
-              style={{ marginTop: 27 }}
-            />
-            <View style={styles.status}>
-              <View
-                style={[
-                  styles.dot,
-                  state.status === 'connected' && { backgroundColor: palette.ink },
-                ]}
-              />
-              <Text style={styles.statusText}>{status}</Text>
-              {connection && state.status !== 'connected' && (
-                <Pressable accessibilityRole="button" onPress={() => client?.connect()}>
-                  <Text style={styles.retry}>重试</Text>
-                </Pressable>
-              )}
-            </View>
-            {state.status === 'error' && <Text style={common.error}>{state.error}</Text>}
+            <ConnectionForm connection={connection} onSave={onSave} />
           </View>
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>电脑</Text>
+            <Text style={styles.sectionTitle}>我的电脑</Text>
             {!state.devices.length && (
               <Text style={[styles.help, { marginTop: 15 }]}>连接后，这里会显示已添加的电脑。</Text>
             )}
             {state.devices.map((device) => (
-              <View key={device.id} style={styles.device}>
+              <Pressable
+                key={device.id}
+                accessibilityRole="button"
+                accessibilityLabel={`查看电脑 ${device.name} 的连接，${computerStatus(state, device)}`}
+                onPress={() => setSelectedDeviceId(device.id)}
+                style={({ pressed }) => [styles.device, pressed && { opacity: 0.6 }]}
+              >
                 <View style={{ flex: 1 }}>
                   <Text style={styles.deviceName}>{device.name}</Text>
                   <Text style={styles.platform}>
@@ -135,10 +65,18 @@ export function Settings({
                           : device.platform}
                   </Text>
                 </View>
-                <Text style={[styles.deviceState, device.online && { color: palette.ink }]}>
-                  {device.online ? '在线' : '离线'}
+                <Text
+                  style={[
+                    styles.deviceState,
+                    computerStatus(state, device) === '在线' && { color: palette.ink },
+                  ]}
+                >
+                  {computerStatus(state, device)}
                 </Text>
-              </View>
+                <View style={{ transform: [{ rotate: '-90deg' }], marginLeft: 10 }}>
+                  <Icon name="chevron" size={13} color={palette.muted} />
+                </View>
+              </Pressable>
             ))}
             {connection && (
               <Button
@@ -149,41 +87,42 @@ export function Settings({
               />
             )}
           </View>
-          <Text style={styles.footer}>Codex Remote · 0.1.0</Text>
+          <Text style={styles.footer}>Codex Remote</Text>
         </View>
       </ScrollView>
+      {selectedDevice && (
+        <DeviceConnectionDetail
+          key={selectedDevice.id}
+          device={selectedDevice}
+          connection={connection}
+          state={state}
+          client={client}
+          onSave={onSave}
+          onClose={() => setSelectedDeviceId(null)}
+        />
+      )}
     </View>
   );
 }
-const styles = StyleSheet.create({
-  section: {
-    paddingTop: 38,
-    paddingBottom: 28,
-    borderBottomWidth: 1,
-    borderBottomColor: palette.line,
-  },
-  sectionTitle: { fontSize: 16, fontWeight: '600', color: palette.ink },
-  help: { fontSize: 13, lineHeight: 22, color: palette.muted, marginTop: 12 },
-  keyHeading: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 9,
-  },
-  showKey: { color: palette.muted, fontSize: 12 },
-  status: { flexDirection: 'row', alignItems: 'center', marginTop: 18, gap: 7 },
-  dot: { width: 5, height: 5, borderRadius: 3, backgroundColor: '#bbb' },
-  statusText: { color: palette.muted, fontSize: 12 },
-  retry: { fontSize: 12, color: palette.ink, marginLeft: 10 },
-  device: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 20,
-    borderBottomColor: palette.line,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-  },
-  deviceName: { fontSize: 15, fontWeight: '500', color: palette.ink },
-  platform: { fontSize: 12, color: palette.muted, marginTop: 5 },
-  deviceState: { fontSize: 12, color: palette.muted },
-  footer: { color: '#aaa', fontSize: 11, marginTop: 28 },
-});
+const createStyles = (palette: Palette) =>
+  StyleSheet.create({
+    section: {
+      paddingTop: 38,
+      paddingBottom: 28,
+      borderBottomWidth: 1,
+      borderBottomColor: palette.line,
+    },
+    sectionTitle: { fontSize: 16, fontWeight: '600', color: palette.ink },
+    help: { fontSize: 13, lineHeight: 22, color: palette.muted, marginTop: 12 },
+    device: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingVertical: 20,
+      borderBottomColor: palette.line,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+    },
+    deviceName: { fontSize: 15, fontWeight: '500', color: palette.ink },
+    platform: { fontSize: 12, color: palette.muted, marginTop: 5 },
+    deviceState: { fontSize: 12, color: palette.muted },
+    footer: { color: palette.muted, fontSize: 11, marginTop: 28 },
+  });

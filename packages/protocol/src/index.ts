@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 export const MAX_FILE_BYTES = 8 * 1024 * 1024;
 export const MAX_WIRE_BYTES = 12 * 1024 * 1024;
 export type JsonRecord = Record<string, unknown>;
@@ -13,10 +13,52 @@ export interface Device {
 }
 export interface Session {
   id: string;
-  projectId: string;
+  projectId: string | null;
+  cwd: string;
   name: string;
   updatedAt: number;
   status: string;
+}
+export interface RecentSession {
+  deviceId: string;
+  session: Session;
+}
+export interface Model {
+  id: string;
+  model: string;
+  displayName: string;
+  description: string;
+  isDefault: boolean;
+  defaultReasoningEffort: string;
+  supportedReasoningEfforts: { reasoningEffort: string; description: string }[];
+}
+export type PermissionMode = 'full-access' | 'approval';
+export type ApprovalPolicy = 'untrusted' | 'on-request' | 'never' | {
+  granular: {
+    sandbox_approval: boolean;
+    rules: boolean;
+    skill_approval: boolean;
+    request_permissions: boolean;
+    mcp_elicitations: boolean;
+  };
+};
+export type SandboxPolicy =
+  | { type: 'dangerFullAccess' }
+  | { type: 'readOnly'; networkAccess: boolean }
+  | { type: 'externalSandbox'; networkAccess: 'restricted' | 'enabled' }
+  | {
+      type: 'workspaceWrite';
+      writableRoots: string[];
+      networkAccess: boolean;
+      excludeTmpdirEnvVar: boolean;
+      excludeSlashTmp: boolean;
+    };
+export interface SessionPermissions {
+  mode: PermissionMode | null;
+  approvalPolicy: ApprovalPolicy;
+  sandboxPolicy: SandboxPolicy;
+  approvalsReviewer: 'user' | 'auto_review' | 'guardian_subagent';
+  profile: { id: string; extends: string | null } | null;
 }
 export interface Project {
   id: string;
@@ -47,6 +89,10 @@ export interface CodexRequest {
 }
 export interface SessionHistory {
   session: Session;
+  model: string | null;
+  reasoningEffort: string | null;
+  permissions: SessionPermissions | null;
+  permissionsUnavailableReason?: string;
   items: ChatItem[];
   nextCursor: string | null;
   activeTurnId: string | null;

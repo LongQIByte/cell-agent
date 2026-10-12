@@ -1,13 +1,15 @@
-import { createHash } from 'node:crypto';
 import { basename } from 'node:path';
-import type { ChatItem, Session } from '@codex-remote/protocol';
-export function projectId(path: string) {
-  return createHash('sha256').update(path).digest('hex').slice(0, 24);
-}
+import { RemoteError, type ChatItem, type Session } from '@codex-remote/protocol';
 export function sessionFrom(thread: any): Session {
+  if (thread.projectId !== null && typeof thread.projectId !== 'string')
+    throw new RemoteError(
+      'CODEX_UNSUPPORTED_API',
+      '当前 Codex 未提供真实项目归属，请配置支持原生项目 API 的新版 CODEX_BIN',
+    );
   return {
     id: thread.id,
-    projectId: projectId(thread.cwd),
+    projectId: thread.projectId,
+    cwd: thread.cwd,
     name: thread.name || thread.preview?.replace(/\s+/g, ' ').slice(0, 60) || '新会话',
     updatedAt: (thread.updatedAt ?? thread.createdAt) * 1000,
     status: thread.status?.type ?? 'notLoaded',

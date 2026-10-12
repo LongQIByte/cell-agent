@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { WebSocket } from 'ws';
 import { createRelay } from '../apps/relay/src/server.js';
+import { PROTOCOL_VERSION } from '@codex-remote/protocol';
 const token = 'test-key-with-at-least-sixteen-characters';
 function inbox(socket: WebSocket) {
   const messages: any[] = [];
@@ -43,7 +44,7 @@ test(
           type: 'hello',
           role,
           token,
-          version: 1,
+          version: PROTOCOL_VERSION,
           device: id ? { id, name: id, platform: 'linux' } : undefined,
         }),
       );
@@ -59,6 +60,16 @@ test(
       );
       const [code] = await once(bad, 'close');
       assert.equal(code, 4001);
+      const outdated = new WebSocket(url);
+      sockets.push(outdated);
+      const rejected = once(outdated, 'close');
+      await once(outdated, 'open');
+      // Version mismatch is distinct from credentials and never enters device routing.
+      outdated.send(JSON.stringify({ type: 'hello', role: 'mobile', token, version: PROTOCOL_VERSION - 1 }));
+      const [mismatchCode, reason] = await rejected;
+      assert.equal(mismatchCode, 4002);
+      assert.match(reason.toString(), /update phone app and restart computer service/);
+      assert.equal(relay.listDevices().length, 0);
       const a = await connect('agent', 'machine-a');
       const b = await connect('agent', 'machine-b');
       const mobile = await connect('mobile');

@@ -33,6 +33,22 @@ node scripts/pairing.mjs
 
 将路径中的发行版名称、Linux 用户名和项目位置改为实际值。脚本将 TCP 8787 转发到 WSL，并添加仅限 LocalSubnet 的防火墙规则。WSL 重启、IP 改变后重新运行。撤销配置运行 `deploy/remove-windows-lan.ps1`。原生 Linux/macOS 可直接监听局域网 IP，不需要此转发。
 
+## 电脑端三平台服务
+
+电脑端提供统一的后台启动、状态、日志、停止操作，以及只在本机打开的浏览器管理页。源码环境完成上面的安装与网页版构建后，可运行：
+
+```bash
+npm run service:start
+npm run service:console
+npm run service:status
+npm run service:logs
+npm run service:stop
+```
+
+Mac 可双击 `service/Start-Mac.command`，Windows 双击 `service/Start-Windows.cmd`，Linux 运行 `bash service/Start-Linux.sh`。后台服务在关闭终端后继续运行；管理页显示实际端口、进程、Agent 在线状态和日志。
+
+`npm run service:build` 生成同一份三平台 ZIP，包含已打包的 Agent/中转程序与网页版。解压后只需要已配置好的 Node.js 和 Codex，无需安装项目依赖。完整操作、手机连接及自定义配置见 [电脑服务使用说明](service/使用说明.md)。
+
 ## 已实现
 
 - 极简 Projects / Settings 双 Tab；项目绑定唯一机器和工作目录，同名、不同机器的项目独立。
@@ -55,7 +71,7 @@ node scripts/pairing.mjs
                                              原生会话、项目与执行工具
 ```
 
-中转服务的 SQLite **仅保存设备 ID、名称、平台与最近上线时间**。请求映射存在内存中，不保存对话、文件或 OpenAI API Key。Agent SQLite 保存项目名称、上传文件索引及发送幂等记录；原生会话仍由 Codex 管理。Android SQLite 在手机本地缓存项目、会话和草稿，配对密钥单独放入系统 SecureStore。
+中转服务的 SQLite **仅保存设备 ID、名称、平台与最近上线时间**。请求映射存在内存中，不保存对话、文件或 OpenAI API Key。Agent SQLite 保存绑定会话的上传文件索引及发送幂等记录；项目和原生会话由 Codex 管理。Android SQLite 在手机本地缓存项目、会话、草稿及通用偏好，配对密钥单独放入系统 SecureStore。
 
 当前局域网使用 `ws://`。外网部署使用 `wss://`，支持服务本身的 `TLS_CERT` / `TLS_KEY`，也提供 Caddy 自动 HTTPS 的部署配置。一个配对密钥对应个人的整组机器。
 
@@ -157,6 +173,8 @@ npm run test:browser   # 先启动 npm start；会调用本机真实 Codex
 本机测试结果、APK 信息和校验值见 [验证记录](artifacts/validation.md)。
 
 ## 当前范围
+
+项目归属使用 Codex 原生 project API 的项目定义，并仅读取本机桌面明确记录的归属 metadata；不按工作目录推断归属，也不写迁移数据。当前客户端使用通信协议 2；旧正式 APK 需要重新安装新版，开发 APK 可通过 Metro 加载新的 JavaScript。
 
 支持读取并继续这台机器保存的原生会话。Agent 启动一个独立的官方 App Server，流式事件覆盖通过该 Agent 执行的任务；其他桌面客户端独立运行的任务通过历史刷新查看，不承诺其跨进程实时事件。为保持会话记录一致，应避免桌面和手机同时向同一个会话发起任务。
 
