@@ -35,6 +35,9 @@ export PATH="$JAVA_HOME/bin:$ANDROID_HOME/platform-tools:$PATH"
 export GRADLE_USER_HOME="${GRADLE_USER_HOME:-$tool_cache/gradle}"
 cd "$project_root/apps/mobile"
 npx expo prebuild --platform android --no-install
+# React Native keys this generated cache by package/lockfiles, while Expo
+# prebuild changes the Android application ID when switching build variants.
+rm -f android/build/generated/autolinking/autolinking.json
 printf 'sdk.dir=%s\n' "$build_sdk_dir" > android/local.properties
 if [[ -n "${CODEX_REMOTE_CMAKE_DIR:-}" ]]; then
   printf 'cmake.dir=%s\n' "$CODEX_REMOTE_CMAKE_DIR" >> android/local.properties

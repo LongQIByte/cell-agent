@@ -20,9 +20,5 @@ export async function readCache<T>(key: string): Promise<T | null> {
   }
 }
 export async function saveCache(key: string, data: unknown) {
-  try {
-    localStorage.setItem(`codex-remote:${key}`, JSON.stringify(data));
-  } catch {
-    /* Browsers may disable storage or run out of quota; the live connection still works. */
-  }
+  localStorage.setItem(`codex-remote:${key}`, JSON.stringify(data));
 }

@@ -10,21 +10,36 @@ import {
   RemoteError,
   idSchema,
   type Project,
+  type RecentSession,
+  type Model,
   type ChatItem,
   type JsonRecord,
   type CodexRequest,
   type SessionHistory,
 } from '@codex-remote/protocol';
 import { CodexRpc } from './codex.js';
-import { AgentStore, type ProjectRow } from './store.js';
-import { projectId, sessionFrom, normalizeItem, mergeItems } from './normalize.js';
+import { AgentStore } from './store.js';
+import { sessionFrom, normalizeItem, mergeItems } from './normalize.js';
+import { readDesktopMembership, desktopSession } from './desktop-membership.js';
+import { settingsFromNotification, settingsFromResume, permissionPreset, type SessionSettings } from './session-settings.js';
+
+interface Catalogue {
+  projects: Project[];
+  recentSessions: RecentSession[];
+}
+interface NativeProject {
+  id: string;
+  name: string;
+  roots: { path: string }[];
+  updatedAt: number;
+}
 
 export class AgentService extends EventEmitter {
   private sequence = 0;
   private closed = false;
   private active = new Map<string, string>();
   private runtime = new Map<string, ChatItem[]>();
-  private loaded = new Set<string>();
+  private settings = new Map<string, SessionSettings>();
   private sending = new Set<string>();
   private pendingRequests = new Map<
     string,
@@ -35,11 +50,12 @@ export class AgentService extends EventEmitter {
       timer: ReturnType<typeof setTimeout>;
     }
   >();
-  private catalogue?: Promise<Project[]>;
+  private catalogues = new Map<boolean, Promise<Catalogue>>();
   constructor(
     readonly codex: CodexRpc,
     readonly store: AgentStore,
     readonly deviceId: string,
+    readonly codexHome = process.env.CODEX_HOME ?? join(homedir(), '.codex'),
   ) {
     super();
     codex.on('notification', (message) => this.notification(message.method, message.params ?? {}));
@@ -64,16 +80,35 @@ export class AgentService extends EventEmitter {
   private notification(method: string, params: any) {
     const threadId = params.threadId;
     if (method === 'thread/started') {
-      this.loaded.add(params.thread.id);
       return;
     }
     if (method === 'thread/closed') {
-      this.loaded.delete(threadId);
       this.active.delete(threadId);
+      this.settings.delete(threadId);
       return;
     }
-    if (method === 'thread/name/updated' || method === 'thread/archived') {
+    if (
+      method === 'thread/name/updated' ||
+      method === 'thread/archived' ||
+      method === 'thread/unarchived' ||
+      method === 'thread/deleted' ||
+      method === 'thread/project/updated' ||
+      method === 'project/changed'
+    ) {
       this.publish('catalog/changed', {});
+      return;
+    }
+    if (method === 'thread/settings/updated') {
+      try {
+        const settings = settingsFromNotification(params.threadSettings);
+        this.settings.set(threadId, settings);
+        this.publish('session/settings', { threadId, ...settings });
+      } catch (error) {
+        this.upsert(threadId, {
+          id: 'settings-error', turnId: this.active.get(threadId) ?? '', kind: 'error',
+          text: (error as Error).message, timestamp: Date.now(),
+        });
+      }
       return;
     }
     if (method === 'serverRequest/resolved') {
@@ -234,16 +269,18 @@ export class AgentService extends EventEmitter {
     this.publish('session/requestResolved', { threadId: pending.threadId, requestId: id });
     return { ok: true };
   }
-  async projects(): Promise<Project[]> {
-    if (this.catalogue) return this.catalogue;
-    this.catalogue = this.loadProjects();
+  async catalogue(archived = false): Promise<Catalogue> {
+    const pending = this.catalogues.get(archived);
+    if (pending) return pending;
+    const catalogue = this.loadCatalogue(archived);
+    this.catalogues.set(archived, catalogue);
     try {
-      return await this.catalogue;
+      return await catalogue;
     } finally {
-      this.catalogue = undefined;
+      this.catalogues.delete(archived);
     }
   }
-  private async loadProjects(): Promise<Project[]> {
+  private async listThreads(archived: boolean): Promise<any[]> {
     const threads: any[] = [];
     let cursor: string | null = null;
     do {
@@ -253,77 +290,133 @@ export class AgentService extends EventEmitter {
         sortKey: 'updated_at',
         modelProviders: [],
         sourceKinds: ['cli', 'vscode', 'appServer', 'exec', 'unknown'],
+        archived,
+        useStateDbOnly: true,
       });
       threads.push(...result.data);
       cursor = result.nextCursor;
     } while (cursor);
-    const byPath = new Map<string, ProjectRow>(this.store.projects().map((row) => [row.path, row]));
-    for (const thread of threads) {
-      if (thread.parentThreadId || typeof thread.cwd !== 'string') continue;
-      if (!byPath.has(thread.cwd))
-        byPath.set(thread.cwd, {
-          id: projectId(thread.cwd),
-          name: basename(thread.cwd) || thread.cwd,
-          path: thread.cwd,
-          updated_at: thread.updatedAt * 1000,
-        });
-    }
-    return Promise.all(
-      [...byPath.values()].map(async (row) => {
-        const sessions = threads
-          .filter((t) => t.cwd === row.path && !t.parentThreadId)
-          .map(sessionFrom)
-          .sort((a, b) => b.updatedAt - a.updatedAt);
-        let available = false;
-        try {
-          available = (await stat(row.path)).isDirectory();
-        } catch {}
-        // Persist directory assignments and names, never duplicate Codex history.
-        if (!this.store.project(row.id)) this.store.saveProject(row);
-        return {
-          id: row.id,
-          deviceId: this.deviceId,
-          name: row.name,
-          path: row.path,
-          available,
-          sessions,
-          updatedAt: Math.max(row.updated_at, ...sessions.map((s) => s.updatedAt)),
-        };
-      }),
-    );
+    return threads.filter((thread) => !thread.parentThreadId && typeof thread.cwd === 'string');
   }
-  private async getProject(id: string) {
-    let row = this.store.project(id);
-    if (!row) {
-      await this.projects();
-      row = this.store.project(id);
-    }
-    if (!row) throw new RemoteError('PROJECT_NOT_FOUND', '项目不存在');
-    if (!(await stat(row.path).catch(() => null))?.isDirectory())
+  private async nativeProjects(): Promise<NativeProject[]> {
+    const projects: NativeProject[] = [];
+    let cursor: string | null = null;
+    do {
+      const result: any = await this.codex.call('project/list', { cursor, limit: 100 });
+      projects.push(...result.data);
+      cursor = result.nextCursor;
+    } while (cursor);
+    return projects;
+  }
+  private async loadCatalogue(archived: boolean): Promise<Catalogue> {
+    const [native, threads, archivedThreads, membership] = await Promise.all([
+      this.nativeProjects(),
+      this.listThreads(archived),
+      archived ? Promise.resolve([]) : this.listThreads(true),
+      readDesktopMembership(this.codexHome),
+    ]);
+    const sessions = threads
+      .flatMap((thread) => {
+        const session = desktopSession(sessionFrom(thread), membership);
+        return session ? [session] : [];
+      })
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+    const knownProjectIds = new Set(native.map((project) => project.id));
+    if (sessions.some((session) => session.projectId !== null && !knownProjectIds.has(session.projectId)))
+      throw new RemoteError('PROJECT_METADATA_UNAVAILABLE', '会话所属项目未出现在 Codex 原生项目目录中，请检查电脑端项目数据');
+    const archivedProjects = new Set(archivedThreads.flatMap((thread) => {
+      const session = desktopSession(sessionFrom(thread), membership);
+      return session ? [session.projectId] : [];
+    }));
+    const projects = await Promise.all(
+      native
+        .filter((project) => {
+          const hasSessions = sessions.some((session) => session.projectId === project.id);
+          return archived ? hasSessions : hasSessions || !archivedProjects.has(project.id);
+        })
+        .map(async (project) => {
+          const path = project.roots[0]?.path ?? '';
+          const members = sessions.filter((session) => session.projectId === project.id);
+          return {
+            id: project.id,
+            deviceId: this.deviceId,
+            name: project.name,
+            path,
+            available: !!path && !!(await stat(path).catch(() => null))?.isDirectory(),
+            sessions: members,
+            updatedAt: Math.max(project.updatedAt * 1000, ...members.map((session) => session.updatedAt)),
+          };
+        }),
+    );
+    return {
+      projects,
+      recentSessions: sessions
+        .filter((session) => session.projectId === null)
+        .map((session) => ({ deviceId: this.deviceId, session })),
+    };
+  }
+  private async getProject(id: string): Promise<NativeProject & { path: string }> {
+    const { project }: { project: NativeProject } = await this.codex.call('project/read', {
+      projectId: id,
+    });
+    const path = project.roots[0]?.path;
+    if (!path || !(await stat(path).catch(() => null))?.isDirectory())
       throw new RemoteError('DIRECTORY_MISSING', '项目目录不存在，请在电脑上恢复该目录');
-    return row;
+    return { ...project, path };
+  }
+  private async models(): Promise<Model[]> {
+    const models: Model[] = [];
+    let cursor: string | null = null;
+    do {
+      const result: any = await this.codex.call('model/list', {
+        cursor,
+        limit: 100,
+        includeHidden: false,
+      });
+      models.push(
+        ...result.data.filter((model: any) => !model.hidden).map((model: any) => ({
+          id: model.id,
+          model: model.model,
+          displayName: model.displayName,
+          description: model.description,
+          isDefault: model.isDefault,
+          defaultReasoningEffort: model.defaultReasoningEffort,
+          supportedReasoningEfforts: model.supportedReasoningEfforts,
+        })),
+      );
+      cursor = result.nextCursor;
+    } while (cursor);
+    return models;
+  }
+  private async localSession(thread: any) {
+    const session = desktopSession(sessionFrom(thread), await readDesktopMembership(this.codexHome));
+    if (!session)
+      throw new RemoteError('SESSION_ON_OTHER_DEVICE', '此会话已属于其他电脑，请从对应设备打开');
+    return session;
   }
   async readSession(threadId: string, cursor?: string | null): Promise<SessionHistory> {
-    let thread: any;
-    let turns: any[];
-    let nextCursor: string | null = null;
+    const { thread } = await this.codex.call('thread/read', { threadId });
+    const session = await this.localSession(thread);
+    let settings: SessionSettings | undefined;
+    let permissionsUnavailableReason: string | undefined;
     try {
-      ({ thread } = await this.codex.call('thread/read', { threadId }));
-      const page: any = await this.codex.call('thread/turns/list', {
-        threadId,
-        cursor: cursor ?? null,
-        limit: 30,
-        sortDirection: 'desc',
-        itemsView: 'full',
-      });
-      turns = [...page.data].reverse();
-      nextCursor = page.nextCursor;
+      const resumed = await this.codex.call('thread/resume', { threadId, excludeTurns: true });
+      settings = settingsFromResume(resumed);
+      this.settings.set(threadId, settings);
     } catch (error) {
-      if (cursor) throw error;
-      // Full-history is the supported fallback for earlier App Server versions.
-      ({ thread } = await this.codex.call('thread/read', { threadId, includeTurns: true }));
-      turns = thread.turns ?? [];
+      if (!(error instanceof RemoteError) || error.code !== 'CODEX_-32600' ||
+          error.message !== `thread ${threadId} already has an active writer`) throw error;
+      this.settings.delete(threadId);
+      permissionsUnavailableReason = '桌面端或其他客户端正在占用此会话，暂时无法读取执行权限';
     }
+    const page: any = await this.codex.call('thread/turns/list', {
+      threadId,
+      cursor: cursor ?? null,
+      limit: 30,
+      sortDirection: 'desc',
+      itemsView: 'full',
+    });
+    const turns = [...page.data].reverse();
     let items: ChatItem[] = [];
     for (const turn of turns) {
       items.push(
@@ -343,10 +436,18 @@ export class AgentService extends EventEmitter {
         });
     }
     if (!cursor) items = mergeItems(items, this.runtime.get(threadId) ?? []);
+    // Settings may have changed while history pages were being read. Snapshot
+    // the latest native notification with the sequence acknowledged below.
+    settings = this.settings.get(threadId) ?? settings;
+    if (settings) permissionsUnavailableReason = undefined;
     return {
-      session: sessionFrom(thread),
+      session,
+      model: settings?.model ?? thread.model ?? null,
+      reasoningEffort: settings ? settings.reasoningEffort : thread.reasoningEffort ?? null,
+      permissions: settings?.permissions ?? null,
+      ...(permissionsUnavailableReason ? { permissionsUnavailableReason } : {}),
       items,
-      nextCursor,
+      nextCursor: page.nextCursor,
       activeTurnId:
         this.active.get(threadId) ?? turns.find((t) => t.status === 'inProgress')?.id ?? null,
       requests: [...this.pendingRequests.values()]
@@ -357,7 +458,46 @@ export class AgentService extends EventEmitter {
   }
   async handle(method: string, raw: JsonRecord): Promise<unknown> {
     await this.codex.ready;
-    if (method === 'projects/list') return { projects: await this.projects() };
+    if (method === 'projects/list') {
+      const { archived } = z.object({ archived: z.boolean().default(false) }).parse(raw);
+      return this.catalogue(archived);
+    }
+    if (method === 'models/list') return { models: await this.models() };
+    if (method === 'sessions/archive' || method === 'sessions/unarchive') {
+      const { threadId } = z.object({ threadId: idSchema }).parse(raw);
+      await this.codex.call(method === 'sessions/archive' ? 'thread/archive' : 'thread/unarchive', { threadId });
+      this.publish('catalog/changed', {});
+      return {};
+    }
+    if (method === 'projects/archive') {
+      const { projectId: id, threadIds } = z.object({ projectId: idSchema, threadIds: z.array(idSchema).min(1).max(5000) }).parse(raw);
+      // Validate canonical project ownership immediately before each archive batch.
+      await this.codex.call('project/read', { projectId: id });
+      const [available, membership] = await Promise.all([
+        this.listThreads(false),
+        readDesktopMembership(this.codexHome),
+      ]);
+      const requested = new Set(threadIds);
+      const threads = available.filter((thread) =>
+        requested.has(thread.id) && desktopSession(sessionFrom(thread), membership)?.projectId === id,
+      );
+      if (threads.length !== requested.size)
+        throw new RemoteError('CATALOG_CHANGED', '项目会话已变化，请刷新列表后重试归档');
+      let archived = 0;
+      const failures: string[] = [];
+      for (const thread of threads) {
+        try {
+          await this.codex.call('thread/archive', { threadId: thread.id });
+          archived++;
+        } catch (error) {
+          failures.push(`${thread.name || thread.id}：${(error as Error).message}`);
+        }
+      }
+      this.publish('catalog/changed', {});
+      if (failures.length)
+        throw new RemoteError('ARCHIVE_PARTIAL', `已归档 ${archived} 个会话，${failures.length} 个未成功。${failures.join('；')}`);
+      return { archived };
+    }
     if (method === 'projects/create') {
       const params = z
         .object({
@@ -372,10 +512,23 @@ export class AgentService extends EventEmitter {
       });
       if (!(await stat(path)).isDirectory())
         throw new RemoteError('NOT_DIRECTORY', '请选择一个目录');
-      const id = projectId(path);
-      this.store.saveProject({ id, name: params.name, path, updated_at: Date.now() });
+      const { project }: { project: NativeProject } = await this.codex.call('project/create', {
+        name: params.name,
+        roots: [{ path }],
+        idempotencyKey: randomUUID(),
+      });
       this.publish('catalog/changed', {});
-      return { project: (await this.projects()).find((p) => p.id === id) };
+      return {
+        project: {
+          id: project.id,
+          deviceId: this.deviceId,
+          name: project.name,
+          path: project.roots[0].path,
+          available: true,
+          sessions: [],
+          updatedAt: project.updatedAt * 1000,
+        } satisfies Project,
+      };
     }
     if (method === 'directories/list') {
       const { readdir } = await import('node:fs/promises');
@@ -401,11 +554,15 @@ export class AgentService extends EventEmitter {
         .object({ projectId: idSchema, name: z.string().trim().max(100).optional() })
         .parse(raw);
       const project = await this.getProject(p.projectId);
-      const { thread } = await this.codex.call('thread/start', { cwd: project.path });
-      this.loaded.add(thread.id);
+      const started = await this.codex.call('thread/start', {
+        cwd: project.path,
+        projectId: project.id,
+        runtimeWorkspaceRoots: project.roots.map((root) => root.path),
+      });
+      const { thread } = started;
+      this.settings.set(thread.id, settingsFromResume(started));
       const name = p.name || '新会话';
       await this.codex.call('thread/name/set', { threadId: thread.id, name });
-      this.store.saveProject({ ...project, updated_at: Date.now() });
       this.publish('catalog/changed', {});
       return { session: { ...sessionFrom(thread), name } };
     }
@@ -416,6 +573,9 @@ export class AgentService extends EventEmitter {
           text: z.string().trim().max(200000),
           attachmentIds: z.array(idSchema).max(6).default([]),
           idempotencyKey: idSchema,
+          model: z.string().trim().min(1).max(150).optional(),
+          effort: z.string().trim().min(1).max(100).optional(),
+          permissionMode: z.enum(['full-access', 'approval']).optional(),
         })
         .parse(raw);
       if (!p.text && !p.attachmentIds.length)
@@ -439,13 +599,13 @@ export class AgentService extends EventEmitter {
       let began = false;
       try {
         const { thread } = await this.codex.call('thread/read', { threadId: p.threadId });
-        const project = await this.getProject(projectId(thread.cwd));
+        await this.localSession(thread);
         const input: any[] = [];
         if (p.text) input.push({ type: 'text', text: p.text, text_elements: [] });
         for (const id of p.attachmentIds) {
           const file = this.store.attachment(id);
-          if (!file || file.project_id !== project.id)
-            throw new RemoteError('ATTACHMENT_NOT_FOUND', '附件不存在或不属于此项目');
+          if (!file || file.thread_id !== p.threadId)
+            throw new RemoteError('ATTACHMENT_NOT_FOUND', '附件不存在或不属于此会话');
           if (/^image\/(png|jpeg|webp|gif)$/.test(file.mime_type))
             input.push({ type: 'localImage', path: file.path });
           else
@@ -455,16 +615,34 @@ export class AgentService extends EventEmitter {
               text_elements: [],
             });
         }
-        if (!this.loaded.has(p.threadId)) {
-          await this.codex.call('thread/resume', { threadId: p.threadId, excludeTurns: true });
-          this.loaded.add(p.threadId);
+        const resumed = await this.codex.call('thread/resume', { threadId: p.threadId, excludeTurns: true });
+        const settings = settingsFromResume(resumed);
+        this.settings.set(p.threadId, settings);
+        let effort = p.effort;
+        if (p.model || effort) {
+          const selected = (await this.models()).find((model) => model.model === (p.model ?? settings.model));
+          if (!selected) throw new RemoteError('MODEL_NOT_FOUND', '所选模型不在当前机器的可用模型中，请刷新后重试');
+          const supported = new Set(selected.supportedReasoningEfforts.map((option) => option.reasoningEffort));
+          if (effort && !supported.has(effort))
+            throw new RemoteError('INVALID_EFFORT', '所选推理强度不受当前模型支持，请重新选择');
+          if (p.model && !effort && supported.size && !supported.has(settings.reasoningEffort ?? '')) {
+            effort = selected.defaultReasoningEffort;
+            if (!supported.has(effort))
+              throw new RemoteError('INVALID_EFFORT', '模型目录的默认推理强度不受支持，请刷新后重试');
+          }
         }
+        const permissions = p.permissionMode
+          ? permissionPreset(p.permissionMode, resumed.runtimeWorkspaceRoots)
+          : {};
         this.store.beginRequest(p.idempotencyKey, p.threadId);
         began = true;
         const { turn } = await this.codex.call('turn/start', {
           threadId: p.threadId,
           input,
           clientUserMessageId: p.idempotencyKey,
+          ...(p.model ? { model: p.model } : {}),
+          ...(effort ? { effort } : {}),
+          ...permissions,
         });
         const result = { turnId: turn.id };
         this.store.finishRequest(p.idempotencyKey, result);
@@ -515,7 +693,7 @@ export class AgentService extends EventEmitter {
     if (method === 'attachments/upload') {
       const p = z
         .object({
-          projectId: idSchema,
+          threadId: idSchema,
           name: z.string().min(1).max(255),
           mimeType: z.string().max(150),
           data: z
@@ -524,7 +702,8 @@ export class AgentService extends EventEmitter {
             .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/),
         })
         .parse(raw);
-      const project = await this.getProject(p.projectId);
+      const { thread } = await this.codex.call('thread/read', { threadId: p.threadId });
+      await this.localSession(thread);
       const data = Buffer.from(p.data, 'base64');
       if (data.length > MAX_FILE_BYTES)
         throw new RemoteError('FILE_TOO_LARGE', '单个附件不能超过 8 MB');
@@ -533,17 +712,21 @@ export class AgentService extends EventEmitter {
         basename(p.name.replace(/\\/g, '/'))
           .replace(/[^\p{L}\p{N}._ -]/gu, '_')
           .slice(0, 100) || 'attachment';
-      const root = await realpath(project.path);
+      const root = await realpath(thread.cwd).catch(() => {
+        throw new RemoteError('DIRECTORY_MISSING', '会话工作目录不存在，请在电脑上恢复该目录');
+      });
+      if (!(await stat(root)).isDirectory())
+        throw new RemoteError('NOT_DIRECTORY', '会话工作目录不是一个目录');
       const base = join(root, '.codex-remote');
       await mkdir(base, { recursive: true, mode: 0o700 });
       const resolvedBase = await realpath(base);
       if (!resolvedBase.startsWith(root + sep))
-        throw new RemoteError('UNSAFE_UPLOAD_DIRECTORY', '附件目录不能指向项目之外');
+        throw new RemoteError('UNSAFE_UPLOAD_DIRECTORY', '附件目录不能指向会话工作目录之外');
       const directory = join(resolvedBase, 'attachments');
       await mkdir(directory, { recursive: true, mode: 0o700 });
       const resolved = await realpath(directory);
       if (!resolved.startsWith(root + sep))
-        throw new RemoteError('UNSAFE_UPLOAD_DIRECTORY', '附件目录不能指向项目之外');
+        throw new RemoteError('UNSAFE_UPLOAD_DIRECTORY', '附件目录不能指向会话工作目录之外');
       const path = join(resolved, `${id}-${name}`);
       const handle = await open(
         path,
@@ -557,7 +740,7 @@ export class AgentService extends EventEmitter {
       }
       this.store.saveAttachment({
         id,
-        project_id: project.id,
+        thread_id: p.threadId,
         name,
         mime_type: p.mimeType,
         size: data.length,

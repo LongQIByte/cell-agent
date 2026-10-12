@@ -22,9 +22,18 @@
     "android:build": "bash scripts/build-android.sh",
     "android:build:dev": "bash scripts/build-android.sh --dev",
     "android:dev:open": "node scripts/open-android-dev.mjs",
-    "connection": "node scripts/connection.mjs"
+    "connection": "node scripts/connection.mjs",
+    "service:start": "node --import tsx scripts/service.mjs start",
+    "service:stop": "node --import tsx scripts/service.mjs stop",
+    "service:status": "node --import tsx scripts/service.mjs status",
+    "service:logs": "node --import tsx scripts/service.mjs logs",
+    "service:console": "node --import tsx scripts/service-console.mjs",
+    "service:doctor": "node --import tsx scripts/service.mjs doctor",
+    "service:build": "npm run web:build && node scripts/build-service.mjs",
+    "test:service": "node --test tests/desktop-service.test.mjs"
   },
   "dependencies": {
+    "cross-spawn": "^7.0.6",
     "qrcode": "^1.5.4",
     "tsx": "^4.20.6",
     "ws": "^8.18.3",
@@ -32,8 +41,11 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.56.0",
+    "@types/cross-spawn": "^6.0.6",
     "@types/node": "^24.7.0",
     "@types/ws": "^8.18.1",
+    "esbuild": "^0.25.12",
+    "fflate": "^0.8.3",
     "typescript": "~5.9.2"
   }
 }

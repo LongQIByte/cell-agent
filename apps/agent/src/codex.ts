@@ -1,7 +1,25 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn as spawnNative, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn } from 'cross-spawn';
 import { createInterface } from 'node:readline';
 import { EventEmitter } from 'node:events';
 import { RemoteError, type JsonRecord } from '@codex-remote/protocol';
+
+export function codexRpcError(method: string, error: { code: number; message: string }): RemoteError {
+  // Method-enum decoding can report -32600 instead of method-not-found. Match
+  // this RPC's exact method so malformed parameter enums keep their real error.
+  const unknownMethod = /^(?:Invalid request:\s*)?unknown (?:variant|method)(?:\s*:\s*|\s+)(?:`([^`]+)`|'([^']+)'|"([^"]+)"|([^\s,]+))/i.exec(error.message);
+  const unavailable = error.code === -32601 || (
+    error.code === -32600 &&
+    unknownMethod !== null &&
+    (unknownMethod[1] ?? unknownMethod[2] ?? unknownMethod[3] ?? unknownMethod[4]) === method
+  );
+  return new RemoteError(
+    unavailable ? 'CODEX_UNSUPPORTED_API' : `CODEX_${error.code}`,
+    unavailable
+      ? `当前 Codex 不支持 ${method}，请更新电脑上的 Codex CLI 并配置新版 CODEX_BIN`
+      : error.message,
+  );
+}
 
 // App Server uses newline-delimited JSON-RPC over stdio. Codex owns all history,
 // authentication, tools and execution policies; this class is only a transport.
@@ -11,6 +29,7 @@ export class CodexRpc extends EventEmitter {
   private pending = new Map<
     number,
     {
+      method: string;
       resolve: (value: any) => void;
       reject: (error: Error) => void;
       timer: ReturnType<typeof setTimeout>;
@@ -36,8 +55,7 @@ export class CodexRpc extends EventEmitter {
         if (!pending) return;
         clearTimeout(pending.timer);
         this.pending.delete(message.id);
-        if (message.error)
-          pending.reject(new RemoteError(`CODEX_${message.error.code}`, message.error.message));
+        if (message.error) pending.reject(codexRpcError(pending.method, message.error));
         else pending.resolve(message.result);
       } else if (message.method) {
         this.emit(message.id === undefined ? 'notification' : 'request', message);
@@ -81,7 +99,7 @@ export class CodexRpc extends EventEmitter {
         this.pending.delete(id);
         reject(new RemoteError('CODEX_TIMEOUT', `${method} 响应超时`));
       }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { method, resolve, reject, timer });
       try {
         this.write({ id, method, params });
       } catch (error) {
@@ -99,6 +117,13 @@ export class CodexRpc extends EventEmitter {
   }
   close() {
     if (this.stopped) return;
+    if (process.platform === 'win32' && this.child.pid) {
+      const killer = spawnNative('taskkill.exe', ['/pid', String(this.child.pid), '/t', '/f'], {
+        windowsHide: true,
+      });
+      killer.on('error', () => this.child.kill());
+      return;
+    }
     this.child.kill('SIGTERM');
     const force = setTimeout(() => this.child.kill('SIGKILL'), 3000);
     force.unref();

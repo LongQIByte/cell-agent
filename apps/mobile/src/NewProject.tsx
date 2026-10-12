@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -13,8 +13,9 @@ import {
 } from 'react-native';
 import type { Device, Project } from '@codex-remote/protocol';
 import type { RemoteClient } from './client';
+import { ComputerPicker } from './ComputerPicker';
 import { Icon } from './icons';
-import { Button, common, palette } from './ui';
+import { Button, useUI, useThemedStyles, type Palette } from './ui';
 interface DirectoryPage {
   path: string;
   directories: { name: string; path: string }[];
@@ -30,6 +31,8 @@ export function NewProject({
   onClose: () => void;
   onCreated: (project: Project) => void;
 }) {
+  const { palette, common, scheme } = useUI();
+  const styles = useThemedStyles(createStyles);
   const [deviceId, setDeviceId] = useState(devices.find((d) => d.online)?.id ?? '');
   const [name, setName] = useState('');
   const [path, setPath] = useState('');
@@ -37,7 +40,30 @@ export function NewProject({
   const [error, setError] = useState('');
   const [directory, setDirectory] = useState<DirectoryPage | null>(null);
   const [browsing, setBrowsing] = useState(false);
+  const [choosingComputer, setChoosingComputer] = useState(false);
+  const browseRequest = useRef(0);
+  const selectedDevice = devices.find((device) => device.id === deviceId);
+  useEffect(() => () => { browseRequest.current++; }, []);
+  function selectComputer(device: Device) {
+    setChoosingComputer(false);
+    if (device.id === deviceId) return;
+    browseRequest.current++;
+    setDeviceId(device.id);
+    setPath('');
+    setDirectory(null);
+    setBrowsing(false);
+    setBusy(false);
+    setError('');
+  }
+  function closeBrowsing() {
+    browseRequest.current++;
+    setBrowsing(false);
+    setBusy(false);
+    setError('');
+  }
   async function browse(nextPath?: string) {
+    if (!selectedDevice?.online) return;
+    const request = ++browseRequest.current;
     setBusy(true);
     setError('');
     setBrowsing(true);
@@ -47,11 +73,11 @@ export function NewProject({
         nextPath ? { path: nextPath } : {},
         deviceId,
       );
-      setDirectory(result);
+      if (browseRequest.current === request) setDirectory(result);
     } catch (e) {
-      setError((e as Error).message);
+      if (browseRequest.current === request) setError((e as Error).message);
     } finally {
-      setBusy(false);
+      if (browseRequest.current === request) setBusy(false);
     }
   }
   async function create() {
@@ -96,28 +122,27 @@ export function NewProject({
             {!browsing ? (
               <>
                 <Text style={common.label}>所属电脑</Text>
-                <View style={{ marginBottom: 27 }}>
-                  {devices
-                    .filter((d) => d.online)
-                    .map((device) => (
-                      <Pressable
-                        key={device.id}
-                        accessibilityRole="radio"
-                        accessibilityState={{ selected: deviceId === device.id }}
-                        accessibilityLabel={`选择电脑 ${device.name}`}
-                        onPress={() => setDeviceId(device.id)}
-                        style={styles.deviceRow}
-                      >
-                        <Text style={styles.deviceName}>{device.name}</Text>
-                        {deviceId === device.id && <Icon name="check" size={18} />}
-                      </Pressable>
-                    ))}
-                </View>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`所属电脑，${selectedDevice?.name ?? '选择电脑'}`}
+                  accessibilityState={{ expanded: choosingComputer, disabled: busy }}
+                  aria-expanded={choosingComputer}
+                  disabled={busy}
+                  onPress={() => setChoosingComputer(true)}
+                  style={styles.deviceSelect}
+                >
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={styles.deviceName} numberOfLines={1}>{selectedDevice?.name ?? '选择电脑'}</Text>
+                    {selectedDevice && <Text style={styles.deviceDetail}>{selectedDevice.platform} · {selectedDevice.online ? '在线' : '未知'}</Text>}
+                  </View>
+                  <Icon name="chevron" size={17} color={palette.muted} />
+                </Pressable>
                 <Text style={common.label}>项目名称</Text>
                 <TextInput
                   accessibilityLabel="项目名称"
                   placeholder="例如：My Project"
-                  placeholderTextColor="#aaa"
+                  placeholderTextColor={palette.muted}
+                keyboardAppearance={scheme}
                   value={name}
                   onChangeText={setName}
                   style={common.field}
@@ -126,7 +151,8 @@ export function NewProject({
                 <TextInput
                   accessibilityLabel="项目目录"
                   placeholder="输入绝对路径或浏览目录"
-                  placeholderTextColor="#aaa"
+                  placeholderTextColor={palette.muted}
+                keyboardAppearance={scheme}
                   autoCapitalize="none"
                   autoCorrect={false}
                   value={path}
@@ -135,8 +161,10 @@ export function NewProject({
                 />
                 <Pressable
                   accessibilityRole="button"
+                  accessibilityLabel="浏览电脑目录"
+                  disabled={busy || !selectedDevice?.online}
                   onPress={() => browse(path || undefined)}
-                  style={{ paddingVertical: 17 }}
+                  style={{ paddingVertical: 17, opacity: selectedDevice?.online ? 1 : 0.45 }}
                 >
                   <Text style={styles.browse}>浏览电脑目录</Text>
                 </Pressable>
@@ -145,7 +173,7 @@ export function NewProject({
               <>
                 <Pressable
                   accessibilityRole="button"
-                  onPress={() => setBrowsing(false)}
+                  onPress={closeBrowsing}
                   style={styles.backRow}
                 >
                   <Icon name="back" size={18} />
@@ -203,18 +231,19 @@ export function NewProject({
             <Button
               label="创建项目"
               onPress={create}
-              disabled={busy || !name.trim() || !path.trim() || !deviceId}
+              disabled={busy || !name.trim() || !path.trim() || !selectedDevice?.online}
             />
           )}
         </View>
       </KeyboardAvoidingView>
+      {choosingComputer && <ComputerPicker devices={devices} selectedId={deviceId} onSelect={selectComputer} onClose={() => setChoosingComputer(false)} />}
     </Modal>
   );
 }
-const styles = StyleSheet.create({
+const createStyles = (palette: Palette) => StyleSheet.create({
   overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.2)', justifyContent: 'center', padding: 20 },
   sheet: {
-    backgroundColor: 'white',
+    backgroundColor: palette.background,
     padding: 25,
     width: '100%',
     maxWidth: 500,
@@ -229,14 +258,19 @@ const styles = StyleSheet.create({
     marginBottom: 30,
   },
   title: { fontSize: 21, fontWeight: '600', color: palette.ink },
-  deviceRow: {
+  deviceSelect: {
     paddingVertical: 12,
+    paddingHorizontal: 12,
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: palette.line,
+    alignItems: 'center',
+    gap: 10,
+    borderWidth: 1,
+    borderColor: palette.line,
+    borderRadius: 8,
+    marginBottom: 27,
   },
   deviceName: { color: palette.ink, fontSize: 15 },
+  deviceDetail: { color: palette.muted, fontSize: 12, marginTop: 4 },
   browse: { color: palette.secondary, fontSize: 13 },
   backRow: { flexDirection: 'row', alignItems: 'center', gap: 7, paddingBottom: 20 },
   directoryPath: { fontSize: 12, color: palette.muted, marginBottom: 20, lineHeight: 20 },

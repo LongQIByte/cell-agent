@@ -4,6 +4,8 @@ import { randomBytes } from 'node:crypto';
 import { hostname, networkInterfaces } from 'node:os';
 import { execFileSync } from 'node:child_process';
 export const root = resolve(import.meta.dirname, '..');
+const environmentFile = resolve(root, '.local/service.env');
+if (existsSync(environmentFile)) process.loadEnvFile(environmentFile);
 export function lanHost() {
   if (process.env.PUBLIC_HOST) return process.env.PUBLIC_HOST;
   const windowsPowerShell = '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe';

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  AppState,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -24,11 +25,22 @@ import {
 } from '@codex-remote/protocol';
 import type { ClientState, RemoteClient } from './client';
 import { readCache, saveCache } from './storage';
+import { createSessionDraftStore, type SessionDraft } from './session-draft';
 import { applySessionEvent, mergeChatItems } from './session-state';
 import { Icon } from './icons';
-import { Button, palette, common } from './ui';
+import { Button, useUI, useThemedStyles, type Palette } from './ui';
+import { MarkdownMessage } from './MarkdownMessage';
+import { TurnSettingsPicker } from './TurnSettingsPicker';
+import {
+  sameTurnOverrides,
+  sessionTurnSettings,
+  turnSettingsParams,
+  type TurnOverrides,
+} from './turn-settings';
 
 function ExecutionItem({ item }: { item: ChatItem }) {
+  const { palette } = useUI();
+  const styles = useThemedStyles(createStyles);
   const [expanded, setExpanded] = useState(item.status === 'failed');
   const failed = item.status === 'failed' || item.status === 'declined';
   return (
@@ -73,6 +85,8 @@ function ExecutionItem({ item }: { item: ChatItem }) {
   );
 }
 function Message({ item }: { item: ChatItem }) {
+  const { common } = useUI();
+  const styles = useThemedStyles(createStyles);
   if (item.kind === 'command' || item.kind === 'file' || item.kind === 'activity')
     return <ExecutionItem item={item} />;
   if (!item.text && !item.attachments?.length) return null;
@@ -87,11 +101,14 @@ function Message({ item }: { item: ChatItem }) {
       style={[styles.message, item.kind === 'user' && styles.userMessage]}
       testID={item.kind === 'assistant' ? 'assistant-message' : 'user-message'}
     >
-      {!!item.text && (
-        <Text selectable style={styles.messageText}>
-          {item.text}
-        </Text>
-      )}
+      {!!item.text &&
+        (item.kind === 'assistant' ? (
+          <MarkdownMessage text={item.text} />
+        ) : (
+          <Text selectable style={styles.messageText}>
+            {item.text}
+          </Text>
+        ))}
       {!!item.attachments?.length && (
         <Text style={styles.attachedNames}>{item.attachments.join(' · ')}</Text>
       )}
@@ -105,6 +122,8 @@ function RequestPrompt({
   request: CodexRequest;
   onRespond: (action: string, answers?: Record<string, string[]>) => Promise<void>;
 }) {
+  const { palette, common, scheme } = useUI();
+  const styles = useThemedStyles(createStyles);
   const [answers, setAnswers] = useState<Record<string, string[]>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -174,7 +193,8 @@ function RequestPrompt({
           <TextInput
             accessibilityLabel={`回答 ${question.question}`}
             placeholder="输入你的回复…"
-            placeholderTextColor="#999"
+            placeholderTextColor={palette.muted}
+            keyboardAppearance={scheme}
             value={answers[question.id]?.[0] ?? ''}
             onChangeText={(text) =>
               setAnswers((previous) => ({ ...previous, [question.id]: [text] }))
@@ -204,28 +224,33 @@ function RequestPrompt({
     </View>
   );
 }
-interface Draft {
-  text: string;
-  files: UploadedFile[];
-  attempt: { key: string; signature: string } | null;
-}
+const drafts = createSessionDraftStore(
+  { read: (key) => readCache<SessionDraft>(key), write: saveCache },
+  Platform.OS !== 'web',
+);
 export function Chat({
-  project,
+  deviceId,
   session,
   client,
   clientState,
   server,
 }: {
-  project: Project;
+  project: Project | null;
+  deviceId: string;
   session: Session;
   client: RemoteClient | null;
   clientState: ClientState;
   server: string;
 }) {
+  const { palette, common, scheme } = useUI();
+  const styles = useThemedStyles(createStyles);
   const insets = useSafeAreaInsets();
   const scroll = useRef<ScrollView>(null);
   const [history, setHistory] = useState<SessionHistory>({
     session,
+    model: null,
+    reasoningEffort: null,
+    permissions: null,
     items: [],
     nextCursor: null,
     activeTurnId: null,
@@ -237,31 +262,70 @@ export function Chat({
   const [error, setError] = useState('');
   const [text, setText] = useState('');
   const [files, setFiles] = useState<UploadedFile[]>([]);
+  const [selectedSettings, setSelectedSettings] = useState<TurnOverrides | null>(null);
   const [draftReady, setDraftReady] = useState(false);
   const [sending, setSending] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [stopping, setStopping] = useState(false);
-  const attempt = useRef<Draft['attempt']>(null);
+  const attempt = useRef<SessionDraft['attempt']>(null);
+  const latestDraft = useRef<SessionDraft>({ text: '', files: [], settings: null, attempt: null });
+  const draftLoaded = useRef(false);
+  const draftTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  latestDraft.current = { text, files, settings: selectedSettings, attempt: attempt.current };
   const loadingRef = useRef(false);
   const buffered = useRef<any[]>([]);
   const alive = useRef(true);
   const pinned = useRef(true);
   const geometry = useRef({ y: 0, height: 0 });
   const prepending = useRef<{ y: number; height: number } | null>(null);
-  const cacheKey = `session:${server}:${project.deviceId}:${session.id}`;
-  const draftKey = `draft:${server}:${project.deviceId}:${session.id}`;
+  const cacheKey = `session:${server}:${deviceId}:${session.id}`;
+  const draftKey = `draft:${server}:${deviceId}:${session.id}`;
   const online =
     clientState.status === 'connected' &&
-    clientState.devices.some((d) => d.id === project.deviceId && d.online);
+    clientState.devices.some((d) => d.id === deviceId && d.online);
+  const persistDraft = useCallback(() => {
+    clearTimeout(draftTimer.current);
+    const draft = latestDraft.current;
+    // Capture every field before the native storage call starts asynchronously.
+    // The web store writes immediately, including when reload follows a tap.
+    return drafts.write(draftKey, {
+      text: draft.text,
+      files: draft.files.map((file) => ({ ...file })),
+      settings: draft.settings ? { ...draft.settings } : null,
+      attempt: attempt.current ? { ...attempt.current } : null,
+    });
+  }, [draftKey]);
   useEffect(() => {
     alive.current = true;
+    const flush = () => {
+      if (draftLoaded.current) void persistDraft().catch(() => {});
+    };
+    const visibility = () => {
+      if (document.visibilityState === 'hidden') flush();
+    };
+    const subscription =
+      Platform.OS === 'web'
+        ? null
+        : AppState.addEventListener('change', (state) => {
+            if (state !== 'active') flush();
+          });
+    if (Platform.OS === 'web') {
+      window.addEventListener('pagehide', flush);
+      document.addEventListener('visibilitychange', visibility);
+    }
     return () => {
       alive.current = false;
+      if (Platform.OS === 'web') {
+        window.removeEventListener('pagehide', flush);
+        document.removeEventListener('visibilitychange', visibility);
+      }
+      subscription?.remove();
+      flush();
     };
-  }, []);
+  }, [persistDraft]);
   useEffect(() => {
     let cancelled = false;
-    void Promise.all([readCache<SessionHistory>(cacheKey), readCache<Draft>(draftKey)])
+    void Promise.all([readCache<SessionHistory>(cacheKey), drafts.read(draftKey)])
       .then(([cached, draft]) => {
         if (cancelled) return;
         if (cached)
@@ -273,13 +337,18 @@ export function Chat({
         if (draft) {
           setText(draft.text);
           setFiles(draft.files);
+          setSelectedSettings(draft.settings);
           attempt.current = draft.attempt;
+          latestDraft.current = draft;
         }
+        draftLoaded.current = true;
         setDraftReady(true);
         if (!online) setLoading(false);
       })
       .catch(() => {
         if (!cancelled) {
+          setError('读取已保存草稿失败，请刷新重试。');
+          draftLoaded.current = true;
           setDraftReady(true);
           setLoading(false);
         }
@@ -290,43 +359,69 @@ export function Chat({
   }, [cacheKey]);
   useEffect(() => {
     if (!draftReady) return;
-    const timer = setTimeout(() => {
-      void saveCache(draftKey, { text, files, attempt: attempt.current }).catch(() => {});
+    draftTimer.current = setTimeout(() => {
+      void persistDraft().catch(() => {
+        if (alive.current) setError('草稿保存失败，请重试。');
+      });
     }, 200);
-    return () => clearTimeout(timer);
-  }, [draftKey, draftReady, text, files, sending]);
+    return () => clearTimeout(draftTimer.current);
+  }, [persistDraft, draftReady, text, files, selectedSettings, sending]);
   const load = useCallback(async () => {
-    if (!client || !online || loadingRef.current) return;
+    if (!client || !online || !draftReady || loadingRef.current) return false;
     loadingRef.current = true;
+    setLoading(true);
     buffered.current = [];
     setError('');
     try {
       let result = await client.request<SessionHistory>(
         'sessions/read',
         { threadId: session.id },
-        project.deviceId,
+        deviceId,
       );
-      if (!alive.current) return;
+      if (!alive.current) return false;
       for (const event of buffered.current) result = applySessionEvent(result, event);
       setHistory(result);
-      await saveCache(cacheKey, result).catch(() => {});
+      void saveCache(cacheKey, result).catch(() => {});
       if (attempt.current && result.items.some((item) => item.clientId === attempt.current?.key)) {
-        setText('');
-        setFiles([]);
+        const [sentText, sentFiles, , sentSettings] = JSON.parse(attempt.current.signature) as [
+          string,
+          string[],
+          ReturnType<typeof turnSettingsParams>,
+          TurnOverrides | null,
+        ];
+        const draft = latestDraft.current;
+        // An acknowledged earlier send must not erase a newer draft typed
+        // while reconnecting or while this snapshot was being loaded.
+        if (
+          draft.text.trim() === sentText &&
+          JSON.stringify(draft.files.map((file) => file.id)) === JSON.stringify(sentFiles)
+        ) {
+          setText('');
+          setFiles([]);
+          latestDraft.current = { ...draft, text: '', files: [] };
+        }
+        if (sameTurnOverrides(draft.settings, sentSettings)) {
+          setSelectedSettings(null);
+          latestDraft.current.settings = null;
+        }
         attempt.current = null;
+        latestDraft.current.attempt = null;
+        void persistDraft().catch(() => {});
       }
+      return true;
     } catch (e) {
       if (alive.current) setError((e as Error).message);
+      return false;
     } finally {
       loadingRef.current = false;
       buffered.current = [];
       if (alive.current) setLoading(false);
     }
-  }, [client, online, project.deviceId, session.id, cacheKey]);
+  }, [client, online, draftReady, deviceId, session.id, cacheKey, persistDraft]);
   useEffect(() => {
     if (!client) return;
     const unsubscribe = client.onEvent((event) => {
-      if (event.deviceId !== project.deviceId || event.params.threadId !== session.id) return;
+      if (event.deviceId !== deviceId || event.params.threadId !== session.id) return;
       if (loadingRef.current) {
         buffered.current.push(event);
         return;
@@ -335,7 +430,7 @@ export function Chat({
     });
     void load();
     return unsubscribe;
-  }, [client, load, project.deviceId, session.id]);
+  }, [client, load, deviceId, session.id]);
   useEffect(() => {
     if (history.sequence < 0) return;
     const timer = setTimeout(() => void saveCache(cacheKey, history).catch(() => {}), 500);
@@ -350,7 +445,7 @@ export function Chat({
       const page = await client.request<SessionHistory>(
         'sessions/read',
         { threadId: session.id, cursor: history.nextCursor },
-        project.deviceId,
+        deviceId,
       );
       prepending.current = { ...geometry.current };
       setHistory((previous) => ({
@@ -365,7 +460,7 @@ export function Chat({
     }
   }
   async function pick() {
-    if (!client || uploading) return;
+    if (!client || !draftReady || uploading) return;
     setError('');
     setUploading(true);
     try {
@@ -394,14 +489,18 @@ export function Chat({
         const uploaded = await client.request<{ file: UploadedFile }>(
           'attachments/upload',
           {
-            projectId: project.id,
+            threadId: session.id,
             name: asset.name,
             mimeType: asset.mimeType ?? 'application/octet-stream',
             data,
           },
-          project.deviceId,
+          deviceId,
         );
-        if (alive.current) setFiles((previous) => [...previous, uploaded.file]);
+        if (alive.current) {
+          const next = [...latestDraft.current.files, uploaded.file];
+          latestDraft.current.files = next;
+          setFiles(next);
+        }
       }
     } catch (e) {
       if (alive.current) setError((e as Error).message);
@@ -413,6 +512,8 @@ export function Chat({
     if (
       !client ||
       !online ||
+      !draftReady ||
+      loading ||
       sending ||
       uploading ||
       history.activeTurnId ||
@@ -420,16 +521,26 @@ export function Chat({
     )
       return;
     const message = text.trim();
-    const signature = JSON.stringify([message, files.map((f) => f.id)]);
+    const settings = turnSettingsParams(history, selectedSettings);
+    const signature = JSON.stringify([message, files.map((f) => f.id), settings, selectedSettings]);
     if (!attempt.current || attempt.current.signature !== signature)
       attempt.current = {
         signature,
         key: `phone-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
       };
+    latestDraft.current.attempt = attempt.current;
     // Persist the key before sending: an uncertain response must not trigger a
     // second turn if the app closes or switches networks.
-    await saveCache(draftKey, { text, files, attempt: attempt.current }).catch(() => {});
     setSending(true);
+    try {
+      await persistDraft();
+    } catch {
+      if (alive.current) {
+        setError('草稿保存失败，请重试。');
+        setSending(false);
+      }
+      return;
+    }
     setError('');
     pinned.current = true;
     try {
@@ -440,13 +551,30 @@ export function Chat({
           text: message,
           attachmentIds: files.map((f) => f.id),
           idempotencyKey: attempt.current.key,
+          ...settings,
         },
-        project.deviceId,
+        deviceId,
       );
       if (alive.current) {
         setText((previous) => (previous.trim() === message ? '' : previous));
         setFiles([]);
-        attempt.current = null;
+        latestDraft.current = {
+          text: latestDraft.current.text.trim() === message ? '' : latestDraft.current.text,
+          files: [],
+          settings: latestDraft.current.settings,
+          attempt: attempt.current,
+        };
+        void persistDraft().catch(() => {});
+        // The ACK does not guarantee that settings notifications have arrived.
+        // Read native configuration before replacing the pending selection.
+        if (await load()) {
+          if (!alive.current) return;
+          setSelectedSettings(null);
+          attempt.current = null;
+          latestDraft.current.settings = null;
+          latestDraft.current.attempt = null;
+          void persistDraft().catch(() => {});
+        }
       }
     } catch (e) {
       if (alive.current) setError((e as Error).message);
@@ -459,7 +587,7 @@ export function Chat({
     setStopping(true);
     setError('');
     try {
-      await client.request('sessions/stop', { threadId: session.id }, project.deviceId);
+      await client.request('sessions/stop', { threadId: session.id }, deviceId);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -526,7 +654,7 @@ export function Chat({
                 await client.request(
                   'requests/respond',
                   { requestId: request.id, action, answers },
-                  project.deviceId,
+                  deviceId,
                 );
               }}
             />
@@ -563,7 +691,11 @@ export function Chat({
                   <Pressable
                     accessibilityRole="button"
                     accessibilityLabel={`移除附件 ${file.name}`}
-                    onPress={() => setFiles((previous) => previous.filter((f) => f.id !== file.id))}
+                    onPress={() => {
+                      const next = latestDraft.current.files.filter((f) => f.id !== file.id);
+                      latestDraft.current.files = next;
+                      setFiles(next);
+                    }}
                     hitSlop={6}
                   >
                     <Icon name="close" size={14} color={palette.secondary} />
@@ -578,7 +710,7 @@ export function Chat({
               accessibilityRole="button"
               accessibilityLabel="添加附件"
               onPress={pick}
-              disabled={!online || uploading || sending}
+              disabled={!online || !draftReady || uploading || sending}
               style={[styles.attachButton, (!online || uploading) && { opacity: 0.35 }]}
             >
               <Icon name="attach" size={22} color={palette.secondary} />
@@ -586,10 +718,15 @@ export function Chat({
             <TextInput
               accessibilityLabel="消息输入框"
               placeholder="Message Codex…"
-              placeholderTextColor="#999"
+              placeholderTextColor={palette.muted}
+              keyboardAppearance={scheme}
               multiline
+              editable={draftReady}
               value={text}
-              onChangeText={setText}
+              onChangeText={(value) => {
+                latestDraft.current.text = value;
+                setText(value);
+              }}
               style={styles.input}
               maxLength={200000}
               onKeyPress={(event) => {
@@ -611,12 +748,18 @@ export function Chat({
               disabled={
                 running
                   ? !online || stopping
-                  : !online || sending || uploading || (!text.trim() && !files.length)
+                  : !online ||
+                    !draftReady ||
+                    loading ||
+                    sending ||
+                    uploading ||
+                    (!text.trim() && !files.length)
               }
               onPress={running ? stop : send}
               style={({ pressed }) => [
                 styles.sendButton,
                 (!online ||
+                  loading ||
                   (!running && !text.trim() && !files.length) ||
                   sending ||
                   uploading) && { opacity: 0.22 },
@@ -624,17 +767,35 @@ export function Chat({
               ]}
             >
               {sending || stopping ? (
-                <ActivityIndicator color="white" size="small" />
+                <ActivityIndicator color={palette.onInk} size="small" />
               ) : (
-                <Icon name={running ? 'stop' : 'send'} size={21} color="white" />
+                <Icon name={running ? 'stop' : 'send'} size={21} color={palette.onInk} />
               )}
             </Pressable>
           </View>
+          <TurnSettingsPicker
+            client={client}
+            deviceId={deviceId}
+            online={online}
+            value={sessionTurnSettings(history, selectedSettings)}
+            permissions={history.permissions}
+            permissionsUnavailableReason={history.permissionsUnavailableReason}
+            disabled={!draftReady || loading || sending || uploading || running}
+            onChange={(changes) => {
+              const next = { ...latestDraft.current.settings, ...changes };
+              latestDraft.current.settings = next;
+              setSelectedSettings(next);
+              setError('');
+              void persistDraft().catch((error: Error) => {
+                if (alive.current) setError(`会话设置未保存：${error.message}`);
+              });
+            }}
+          />
           {!online && (
             <Text style={styles.connectionHint}>
               {clientState.status === 'reconnecting' || clientState.status === 'connecting'
                 ? '正在重新连接，任务会继续在电脑上运行'
-                : '电脑离线 · 已保存的消息仍可查看'}
+                : '电脑状态未知 · 已保存的消息仍可查看'}
             </Text>
           )}
         </View>
@@ -642,111 +803,113 @@ export function Chat({
     </KeyboardAvoidingView>
   );
 }
-const styles = StyleSheet.create({
-  chat: { flex: 1, backgroundColor: 'white' },
-  messages: { flexGrow: 1, paddingTop: 20, paddingBottom: 22 },
-  chatWidth: { width: '100%', maxWidth: 760, alignSelf: 'center', paddingHorizontal: 21 },
-  message: { marginVertical: 13, alignSelf: 'flex-start', maxWidth: '100%' },
-  messageText: { fontSize: 16, lineHeight: 26, color: palette.ink },
-  userMessage: {
-    alignSelf: 'flex-end',
-    backgroundColor: palette.soft,
-    borderRadius: 19,
-    paddingVertical: 11,
-    paddingHorizontal: 16,
-    maxWidth: '88%',
-    marginTop: 22,
-    marginBottom: 18,
-  },
-  attachedNames: { fontSize: 12, color: palette.muted, marginTop: 9 },
-  execution: { marginVertical: 6 },
-  executionHeading: { flexDirection: 'row', alignItems: 'center', gap: 9, paddingVertical: 8 },
-  executionDot: { width: 4, height: 4, borderRadius: 2, backgroundColor: '#999' },
-  executionTitle: { flex: 1, fontSize: 12, lineHeight: 19, color: palette.secondary },
-  executionBody: {
-    marginLeft: 13,
-    marginTop: 2,
-    paddingVertical: 10,
-    paddingHorizontal: 11,
-    backgroundColor: '#fafafa',
-    borderRadius: 5,
-  },
-  executionOutput: { fontSize: 11, lineHeight: 18, color: palette.secondary },
-  mono: { fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
-  empty: { flex: 1, paddingTop: 130, paddingBottom: 70, alignItems: 'center' },
-  emptyTitle: { fontSize: 26, fontWeight: '600', letterSpacing: -0.6, color: palette.ink },
-  emptyHint: { fontSize: 13, color: '#999', marginTop: 13 },
-  progress: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingTop: 17,
-    paddingBottom: 6,
-  },
-  progressDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: '#777' },
-  progressText: { fontSize: 12, color: palette.muted },
-  composerOuter: { backgroundColor: 'white', paddingTop: 10 },
-  composer: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    minHeight: 54,
-    borderRadius: 27,
-    borderWidth: 1,
-    borderColor: '#dedede',
-    padding: 5,
-  },
-  attachButton: { height: 42, width: 38, alignItems: 'center', justifyContent: 'center' },
-  input: {
-    flex: 1,
-    fontSize: 15,
-    lineHeight: 23,
-    maxHeight: 145,
-    minHeight: 42,
-    paddingVertical: 9,
-    paddingHorizontal: 8,
-    color: palette.ink,
-    textAlignVertical: 'center',
-  },
-  sendButton: {
-    width: 42,
-    height: 42,
-    borderRadius: 23,
-    backgroundColor: palette.ink,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  attachments: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, paddingBottom: 12 },
-  fileChip: {
-    flexDirection: 'row',
-    gap: 8,
-    alignItems: 'center',
-    backgroundColor: palette.soft,
-    borderRadius: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    maxWidth: 230,
-  },
-  fileName: { fontSize: 12, color: palette.secondary, flexShrink: 1 },
-  connectionHint: { fontSize: 10, textAlign: 'center', color: palette.muted, marginTop: 8 },
-  retry: { fontSize: 12, color: palette.secondary },
-  prompt: {
-    paddingVertical: 22,
-    marginVertical: 14,
-    borderTopWidth: 1,
-    borderBottomWidth: 1,
-    borderColor: palette.line,
-  },
-  promptTitle: { color: palette.ink, fontSize: 16, fontWeight: '600' },
-  promptDescription: { color: palette.secondary, fontSize: 14, lineHeight: 23, marginTop: 10 },
-  promptCommand: { fontSize: 12, lineHeight: 20, color: palette.secondary, marginTop: 15 },
-  promptActions: { flexDirection: 'row', gap: 7, marginTop: 20 },
-  answerOption: {
-    borderWidth: 1,
-    borderColor: '#ddd',
-    borderRadius: 7,
-    padding: 13,
-    marginTop: 10,
-  },
-  optionLabel: { fontSize: 14, color: palette.ink },
-  optionDescription: { fontSize: 12, lineHeight: 19, color: palette.muted, marginTop: 4 },
-});
+const createStyles = (palette: Palette) =>
+  StyleSheet.create({
+    chat: { flex: 1, backgroundColor: palette.background },
+    messages: { flexGrow: 1, paddingTop: 20, paddingBottom: 22 },
+    chatWidth: { width: '100%', maxWidth: 760, alignSelf: 'center', paddingHorizontal: 21 },
+    message: { marginVertical: 13, alignSelf: 'flex-start', width: '100%', maxWidth: '100%' },
+    messageText: { fontSize: 16, lineHeight: 26, color: palette.ink },
+    userMessage: {
+      width: 'auto',
+      alignSelf: 'flex-end',
+      backgroundColor: palette.soft,
+      borderRadius: 19,
+      paddingVertical: 11,
+      paddingHorizontal: 16,
+      maxWidth: '88%',
+      marginTop: 22,
+      marginBottom: 18,
+    },
+    attachedNames: { fontSize: 12, color: palette.muted, marginTop: 9 },
+    execution: { marginVertical: 6 },
+    executionHeading: { flexDirection: 'row', alignItems: 'center', gap: 9, paddingVertical: 8 },
+    executionDot: { width: 4, height: 4, borderRadius: 2, backgroundColor: palette.muted },
+    executionTitle: { flex: 1, fontSize: 12, lineHeight: 19, color: palette.secondary },
+    executionBody: {
+      marginLeft: 13,
+      marginTop: 2,
+      paddingVertical: 10,
+      paddingHorizontal: 11,
+      backgroundColor: palette.soft,
+      borderRadius: 5,
+    },
+    executionOutput: { fontSize: 11, lineHeight: 18, color: palette.secondary },
+    mono: { fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
+    empty: { flex: 1, paddingTop: 130, paddingBottom: 70, alignItems: 'center' },
+    emptyTitle: { fontSize: 26, fontWeight: '600', letterSpacing: -0.6, color: palette.ink },
+    emptyHint: { fontSize: 13, color: palette.muted, marginTop: 13 },
+    progress: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      paddingTop: 17,
+      paddingBottom: 6,
+    },
+    progressDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: palette.secondary },
+    progressText: { fontSize: 12, color: palette.muted },
+    composerOuter: { backgroundColor: palette.background, paddingTop: 10 },
+    composer: {
+      flexDirection: 'row',
+      alignItems: 'flex-end',
+      minHeight: 54,
+      borderRadius: 27,
+      borderWidth: 1,
+      borderColor: palette.line,
+      padding: 5,
+    },
+    attachButton: { height: 42, width: 38, alignItems: 'center', justifyContent: 'center' },
+    input: {
+      flex: 1,
+      fontSize: 15,
+      lineHeight: 23,
+      maxHeight: 145,
+      minHeight: 42,
+      paddingVertical: 9,
+      paddingHorizontal: 8,
+      color: palette.ink,
+      textAlignVertical: 'center',
+    },
+    sendButton: {
+      width: 42,
+      height: 42,
+      borderRadius: 23,
+      backgroundColor: palette.ink,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    attachments: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, paddingBottom: 12 },
+    fileChip: {
+      flexDirection: 'row',
+      gap: 8,
+      alignItems: 'center',
+      backgroundColor: palette.soft,
+      borderRadius: 6,
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+      maxWidth: 230,
+    },
+    fileName: { fontSize: 12, color: palette.secondary, flexShrink: 1 },
+    connectionHint: { fontSize: 10, textAlign: 'center', color: palette.muted, marginTop: 8 },
+    retry: { fontSize: 12, color: palette.secondary },
+    prompt: {
+      paddingVertical: 22,
+      marginVertical: 14,
+      borderTopWidth: 1,
+      borderBottomWidth: 1,
+      borderColor: palette.line,
+    },
+    promptTitle: { color: palette.ink, fontSize: 16, fontWeight: '600' },
+    promptDescription: { color: palette.secondary, fontSize: 14, lineHeight: 23, marginTop: 10 },
+    promptCommand: { fontSize: 12, lineHeight: 20, color: palette.secondary, marginTop: 15 },
+    promptActions: { flexDirection: 'row', gap: 7, marginTop: 20 },
+    answerOption: {
+      borderWidth: 1,
+      borderColor: palette.line,
+      borderRadius: 7,
+      padding: 13,
+      marginTop: 10,
+    },
+    optionLabel: { fontSize: 14, color: palette.ink },
+    optionDescription: { fontSize: 12, lineHeight: 19, color: palette.muted, marginTop: 4 },
+  });

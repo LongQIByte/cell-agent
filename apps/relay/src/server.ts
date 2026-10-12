@@ -226,12 +226,20 @@ export function createRelay(options: RelayOptions) {
         return;
       }
       if (!peer.role) {
+        if (
+          message.type === 'hello' &&
+          typeof message.version === 'number' &&
+          message.version !== PROTOCOL_VERSION
+        ) {
+          socket.close(4002, 'Protocol mismatch: update phone app and restart computer service');
+          return;
+        }
         const parsed = helloSchema.safeParse(message);
         if (
           !parsed.success ||
           !timingSafeEqual(digest, createHash('sha256').update(parsed.data.token).digest())
         ) {
-          socket.close(4001, 'Invalid pairing key or protocol version');
+          socket.close(4001, 'Invalid pairing key');
           return;
         }
         const hello = parsed.data;

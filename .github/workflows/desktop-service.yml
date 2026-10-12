@@ -1,0 +1,22 @@
+name: Desktop service portability
+on:
+  push:
+    branches: [main, 'codex/**']
+    paths: ['apps/agent/**', 'apps/relay/**', 'packages/protocol/**', 'scripts/**', 'service/**', 'tests/desktop-service.test.mjs', 'package*.json', '.github/workflows/desktop-service.yml']
+  pull_request:
+    paths: ['apps/agent/**', 'apps/relay/**', 'packages/protocol/**', 'scripts/**', 'service/**', 'tests/desktop-service.test.mjs', 'package*.json', '.github/workflows/desktop-service.yml']
+jobs:
+  lifecycle:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run test:service

@@ -105,6 +105,10 @@ export class RemoteClient {
         return;
       }
       if (message.type === 'ready') {
+        if (message.version !== PROTOCOL_VERSION) {
+          socket.close(4002, 'Protocol version mismatch');
+          return;
+        }
         clearTimeout(this.authTimer);
         this.retry = 0;
         this.update({ status: 'connected', devices: message.devices, error: undefined });
@@ -138,11 +142,13 @@ export class RemoteClient {
       }
       this.pending.clear();
       if (this.stopped) return;
-      if (event.code === 4001) {
+      if (event.code === 4001 || event.code === 4002) {
         this.stopped = true;
         this.update({
           status: 'error',
-          error: '配对密钥不正确，请在 Settings 中重新填写',
+          error: event.code === 4002
+            ? '手机与电脑服务版本不一致，请更新手机应用并重启电脑服务'
+            : '配对密钥不正确，请在 Settings 中重新填写',
           devices: this.state.devices.map((d) => ({ ...d, online: false })),
         });
         return;
