@@ -132,7 +132,10 @@ export function createRelay(options: RelayOptions) {
       return;
     }
     let file: string | undefined;
-    if (pathname === '/downloads/codex-remote.apk' || pathname === '/downloads/codex-remote-dev.apk') {
+    if (
+      pathname === '/downloads/codex-remote.apk' ||
+      pathname === '/downloads/codex-remote-dev.apk'
+    ) {
       const apk = pathname.endsWith('codex-remote-dev.apk') ? options.devApkPath : options.apkPath;
       if (!apk || !existsSync(apk)) {
         res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -141,7 +144,10 @@ export function createRelay(options: RelayOptions) {
       }
       file = apk;
       res.setHeader('Content-Type', 'application/vnd.android.package-archive');
-      res.setHeader('Content-Disposition', `attachment; filename="${pathname.slice('/downloads/'.length)}"`);
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${pathname.slice('/downloads/'.length)}"`,
+      );
     } else if (options.webDir && existsSync(options.webDir)) {
       const root = realpathSync(options.webDir);
       const candidate = resolve(root, `.${pathname}`);

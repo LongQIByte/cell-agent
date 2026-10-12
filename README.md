@@ -108,7 +108,7 @@ npm run android:dev:open
 
 这条命令安装开发版并直接打开局域网开发地址。`adb` 需要在 PATH 中，或设置 `ANDROID_HOME`；多台设备时用 `ANDROID_SERIAL` 选择手机。日常只需保持 `npm run dev` 运行，修改并保存 JS/TS、组件和样式后手机通过 Fast Refresh 自动刷新，通常保留组件状态；某些修改会触发整页重载。无需 Expo 登录、发布更新包或重新跑 Gradle。也可按 Expo 终端的 `w` 打开浏览器开发版。
 
-电脑防火墙需要允许局域网访问 TCP **8081**（Metro）和 **8787**（Relay）。WSL 还需要转发这两个端口，运行下述更新后的 Windows LAN 脚本。若电脑 IP 改变，重新启动服务并在 launcher 选择新的 Metro 地址。安装/升级原生库、修改 app config 或升级 Expo 时，重新运行 `npm run android:build:dev` 并安装。开发版运行依赖电脑上的 Metro；需要脱离开发服务器使用时，安装下面的正式版 APK。
+电脑防火墙需要允许局域网访问 TCP **8081**（Metro）和 **8787**（Relay；配置过其他端口时用该端口）。`npm run dev` 会复用已保存的 Relay 端口，也可用 `RELAY_PORT` 覆盖。WSL 还需要转发这两个端口，运行下述更新后的 Windows LAN 脚本；自定义端口时例如 `-Ports 8788,8081`。若电脑 IP 改变，重新启动服务并在 launcher 选择新的 Metro 地址。安装/升级原生库、修改 app config 或升级 Expo 时，重新运行 `npm run android:build:dev` 并安装。开发版运行依赖电脑上的 Metro；需要脱离开发服务器使用时，安装下面的正式版 APK。
 
 ### 正式版 APK
 
