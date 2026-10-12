@@ -4,6 +4,7 @@ import {
   AppState,
   BackHandler,
   Dimensions,
+  Keyboard,
   Linking,
   PanResponder,
   Platform,
@@ -68,6 +69,7 @@ function Main() {
   const pendingCollapse = useRef(new Map<string, boolean>());
   const [error, setError] = useState('');
   const [selected, setSelected] = useState<Selected | null>(null);
+  useEffect(() => { Keyboard.dismiss(); }, [selected?.session.id, tab]);
   const [newProject, setNewProject] = useState(false);
   const [creatingId, setCreatingId] = useState<string | null>(null);
   const client = useMemo(
