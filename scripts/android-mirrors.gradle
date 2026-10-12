@@ -1,0 +1,29 @@
+// Optional build init script for networks that cannot reach Google's Maven.
+// Usage: CODEX_REMOTE_GRADLE_INIT=/absolute/path/to/this/file npm run android:build
+// NDK 27.3 is compatible with this build and available in the pinned SDK image.
+beforeSettings { settings ->
+  if (System.getenv('CODEX_REMOTE_PROXY_PORT')) return
+  settings.pluginManagement.repositories {
+    maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+    maven { url 'https://maven.aliyun.com/repository/google' }
+    maven { url 'https://maven.aliyun.com/repository/public' }
+    gradlePluginPortal()
+    mavenCentral()
+  }
+}
+gradle.beforeProject { project ->
+  if (project.parent == null && System.getenv('CODEX_REMOTE_NDK_VERSION')) {
+    project.ext.ndkVersion = System.getenv('CODEX_REMOTE_NDK_VERSION')
+  }
+  // Prefer official repositories when the build has a working proxy.
+  if (System.getenv('CODEX_REMOTE_PROXY_PORT')) return
+  project.buildscript.repositories {
+    maven { url 'https://maven.aliyun.com/repository/google' }
+    maven { url 'https://maven.aliyun.com/repository/public' }
+    maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+  }
+  project.repositories {
+    maven { url 'https://maven.aliyun.com/repository/google' }
+    maven { url 'https://maven.aliyun.com/repository/public' }
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "expo": {
+    "name": "Codex Remote",
+    "slug": "codex-remote",
+    "version": "0.1.0",
+    "scheme": "codex-remote",
+    "orientation": "default",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "android": {
+      "package": "com.codexremote.personal",
+      "versionCode": 1,
+      "softwareKeyboardLayoutMode": "resize",
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": true,
+      "permissions": ["INTERNET"],
+      "allowBackup": false,
+      "blockedPermissions": [
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE"
+      ]
+    },
+    "ios": {
+      "bundleIdentifier": "com.codexremote.personal",
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "Connect to your computers on the local network.",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    },
+    "web": {
+      "bundler": "metro",
+      "name": "Codex Remote",
+      "shortName": "Codex Remote"
+    },
+    "plugins": [
+      "expo-secure-store",
+      "expo-document-picker",
+      "expo-sqlite",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
+    ],
+    "icon": "./assets/icon.png"
+  }
+}

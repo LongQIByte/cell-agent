@@ -1,0 +1,37 @@
+{
+  "name": "codex-remote",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "start": "node scripts/lan.mjs",
+    "dev": "node scripts/lan.mjs --dev",
+    "agent": "node --import tsx apps/agent/src/index.ts",
+    "relay": "node --import tsx apps/relay/src/index.ts",
+    "web:build": "npm run export:web --workspace @codex-remote/mobile",
+    "typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck --workspace @codex-remote/mobile",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "test:browser": "playwright test",
+    "android:build": "bash scripts/build-android.sh",
+    "connection": "node scripts/connection.mjs"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4",
+    "tsx": "^4.20.6",
+    "ws": "^8.18.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.0",
+    "@types/node": "^24.7.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "~5.9.2"
+  }
+}

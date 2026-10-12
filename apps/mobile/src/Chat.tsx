@@ -1,0 +1,752 @@
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system/legacy';
+import {
+  MAX_FILE_BYTES,
+  type ChatItem,
+  type CodexRequest,
+  type Project,
+  type Session,
+  type SessionHistory,
+  type UploadedFile,
+} from '@codex-remote/protocol';
+import type { ClientState, RemoteClient } from './client';
+import { readCache, saveCache } from './storage';
+import { applySessionEvent, mergeChatItems } from './session-state';
+import { Icon } from './icons';
+import { Button, palette, common } from './ui';
+
+function ExecutionItem({ item }: { item: ChatItem }) {
+  const [expanded, setExpanded] = useState(item.status === 'failed');
+  const failed = item.status === 'failed' || item.status === 'declined';
+  return (
+    <View style={styles.execution}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`执行详情 ${item.text}`}
+        accessibilityState={{ expanded }}
+        aria-expanded={expanded}
+        onPress={() => setExpanded(!expanded)}
+        style={styles.executionHeading}
+      >
+        <View style={[styles.executionDot, failed && { backgroundColor: palette.error }]} />
+        <Text
+          style={[
+            styles.executionTitle,
+            item.kind === 'command' && styles.mono,
+            failed && { color: palette.error },
+          ]}
+          numberOfLines={expanded ? undefined : 2}
+        >
+          {item.text || '执行中…'}
+        </Text>
+        <View style={{ transform: [{ rotate: expanded ? '180deg' : '0deg' }] }}>
+          <Icon name="chevron" size={13} color={palette.muted} />
+        </View>
+      </Pressable>
+      {expanded && (
+        <View style={styles.executionBody}>
+          {item.details ? (
+            <Text selectable style={[styles.executionOutput, styles.mono]}>
+              {item.details}
+            </Text>
+          ) : (
+            <Text style={styles.executionOutput}>
+              {item.status === 'inProgress' ? '正在执行…' : '已完成'}
+            </Text>
+          )}
+        </View>
+      )}
+    </View>
+  );
+}
+function Message({ item }: { item: ChatItem }) {
+  if (item.kind === 'command' || item.kind === 'file' || item.kind === 'activity')
+    return <ExecutionItem item={item} />;
+  if (!item.text && !item.attachments?.length) return null;
+  if (item.kind === 'error')
+    return (
+      <Text selectable style={[common.error, { marginVertical: 14 }]}>
+        {item.text}
+      </Text>
+    );
+  return (
+    <View
+      style={[styles.message, item.kind === 'user' && styles.userMessage]}
+      testID={item.kind === 'assistant' ? 'assistant-message' : 'user-message'}
+    >
+      {!!item.text && (
+        <Text selectable style={styles.messageText}>
+          {item.text}
+        </Text>
+      )}
+      {!!item.attachments?.length && (
+        <Text style={styles.attachedNames}>{item.attachments.join(' · ')}</Text>
+      )}
+    </View>
+  );
+}
+function RequestPrompt({
+  request,
+  onRespond,
+}: {
+  request: CodexRequest;
+  onRespond: (action: string, answers?: Record<string, string[]>) => Promise<void>;
+}) {
+  const [answers, setAnswers] = useState<Record<string, string[]>>({});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const p = request.params as any;
+  const questions = p.questions as
+    | { id: string; question: string; options?: { label: string; description: string }[] }[]
+    | undefined;
+  const input = request.method === 'item/tool/requestUserInput';
+  const elicitation = request.method === 'mcpServer/elicitation/request';
+  async function respond(action: string) {
+    setBusy(true);
+    setError('');
+    try {
+      await onRespond(action, answers);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <View style={styles.prompt}>
+      <Text style={styles.promptTitle}>
+        {input
+          ? 'Codex 需要你的回复'
+          : elicitation
+            ? '此工具需要在电脑上完成授权'
+            : 'Codex 需要你的许可'}
+      </Text>
+      {!!p.reason && <Text style={styles.promptDescription}>{p.reason}</Text>}
+      {!!p.command && (
+        <Text selectable style={[styles.promptCommand, styles.mono]}>
+          {p.command}
+        </Text>
+      )}
+      {!!p.networkApprovalContext && (
+        <Text style={styles.promptDescription}>
+          {p.networkApprovalContext.protocol} · {p.networkApprovalContext.host}
+        </Text>
+      )}
+      {request.method === 'item/permissions/requestApproval' && (
+        <Text selectable style={[styles.promptDescription, styles.mono]}>
+          {JSON.stringify(p.permissions, null, 2)}
+        </Text>
+      )}
+      {questions?.map((question) => (
+        <View key={question.id} style={{ marginTop: 18 }}>
+          <Text style={styles.promptDescription}>{question.question}</Text>
+          {question.options?.map((option) => (
+            <Pressable
+              key={option.label}
+              accessibilityRole="radio"
+              accessibilityState={{ selected: answers[question.id]?.[0] === option.label }}
+              accessibilityLabel={option.label}
+              onPress={() =>
+                setAnswers((previous) => ({ ...previous, [question.id]: [option.label] }))
+              }
+              style={[
+                styles.answerOption,
+                answers[question.id]?.[0] === option.label && { borderColor: palette.ink },
+              ]}
+            >
+              <Text style={styles.optionLabel}>{option.label}</Text>
+              <Text style={styles.optionDescription}>{option.description}</Text>
+            </Pressable>
+          ))}
+          <TextInput
+            accessibilityLabel={`回答 ${question.question}`}
+            placeholder="输入你的回复…"
+            placeholderTextColor="#999"
+            value={answers[question.id]?.[0] ?? ''}
+            onChangeText={(text) =>
+              setAnswers((previous) => ({ ...previous, [question.id]: [text] }))
+            }
+            style={common.field}
+          />
+        </View>
+      ))}
+      {!!error && <Text style={[common.error, { marginTop: 14 }]}>{error}</Text>}
+      <View style={styles.promptActions}>
+        {!elicitation && (
+          <Button
+            label={input ? '回复' : '允许本次'}
+            onPress={() => respond('accept')}
+            disabled={busy}
+            style={{ paddingVertical: 11, minHeight: 40 }}
+          />
+        )}
+        <Button
+          label={input || elicitation ? '取消' : '拒绝'}
+          onPress={() => respond(input || elicitation ? 'cancel' : 'decline')}
+          disabled={busy}
+          subtle
+          style={{ paddingVertical: 11, minHeight: 40 }}
+        />
+      </View>
+    </View>
+  );
+}
+interface Draft {
+  text: string;
+  files: UploadedFile[];
+  attempt: { key: string; signature: string } | null;
+}
+export function Chat({
+  project,
+  session,
+  client,
+  clientState,
+  server,
+}: {
+  project: Project;
+  session: Session;
+  client: RemoteClient | null;
+  clientState: ClientState;
+  server: string;
+}) {
+  const insets = useSafeAreaInsets();
+  const scroll = useRef<ScrollView>(null);
+  const [history, setHistory] = useState<SessionHistory>({
+    session,
+    items: [],
+    nextCursor: null,
+    activeTurnId: null,
+    requests: [],
+    sequence: -1,
+  });
+  const [loading, setLoading] = useState(true);
+  const [olderLoading, setOlderLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [text, setText] = useState('');
+  const [files, setFiles] = useState<UploadedFile[]>([]);
+  const [draftReady, setDraftReady] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const attempt = useRef<Draft['attempt']>(null);
+  const loadingRef = useRef(false);
+  const buffered = useRef<any[]>([]);
+  const alive = useRef(true);
+  const pinned = useRef(true);
+  const geometry = useRef({ y: 0, height: 0 });
+  const prepending = useRef<{ y: number; height: number } | null>(null);
+  const cacheKey = `session:${server}:${project.deviceId}:${session.id}`;
+  const draftKey = `draft:${server}:${project.deviceId}:${session.id}`;
+  const online =
+    clientState.status === 'connected' &&
+    clientState.devices.some((d) => d.id === project.deviceId && d.online);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.all([readCache<SessionHistory>(cacheKey), readCache<Draft>(draftKey)])
+      .then(([cached, draft]) => {
+        if (cancelled) return;
+        if (cached)
+          setHistory((previous) =>
+            previous.sequence < 0
+              ? { ...cached, sequence: -1, requests: [], activeTurnId: null }
+              : previous,
+          );
+        if (draft) {
+          setText(draft.text);
+          setFiles(draft.files);
+          attempt.current = draft.attempt;
+        }
+        setDraftReady(true);
+        if (!online) setLoading(false);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setDraftReady(true);
+          setLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cacheKey]);
+  useEffect(() => {
+    if (!draftReady) return;
+    const timer = setTimeout(() => {
+      void saveCache(draftKey, { text, files, attempt: attempt.current }).catch(() => {});
+    }, 200);
+    return () => clearTimeout(timer);
+  }, [draftKey, draftReady, text, files, sending]);
+  const load = useCallback(async () => {
+    if (!client || !online || loadingRef.current) return;
+    loadingRef.current = true;
+    buffered.current = [];
+    setError('');
+    try {
+      let result = await client.request<SessionHistory>(
+        'sessions/read',
+        { threadId: session.id },
+        project.deviceId,
+      );
+      if (!alive.current) return;
+      for (const event of buffered.current) result = applySessionEvent(result, event);
+      setHistory(result);
+      await saveCache(cacheKey, result).catch(() => {});
+      if (attempt.current && result.items.some((item) => item.clientId === attempt.current?.key)) {
+        setText('');
+        setFiles([]);
+        attempt.current = null;
+      }
+    } catch (e) {
+      if (alive.current) setError((e as Error).message);
+    } finally {
+      loadingRef.current = false;
+      buffered.current = [];
+      if (alive.current) setLoading(false);
+    }
+  }, [client, online, project.deviceId, session.id, cacheKey]);
+  useEffect(() => {
+    if (!client) return;
+    const unsubscribe = client.onEvent((event) => {
+      if (event.deviceId !== project.deviceId || event.params.threadId !== session.id) return;
+      if (loadingRef.current) {
+        buffered.current.push(event);
+        return;
+      }
+      setHistory((previous) => applySessionEvent(previous, event));
+    });
+    void load();
+    return unsubscribe;
+  }, [client, load, project.deviceId, session.id]);
+  useEffect(() => {
+    if (history.sequence < 0) return;
+    const timer = setTimeout(() => void saveCache(cacheKey, history).catch(() => {}), 500);
+    return () => clearTimeout(timer);
+  }, [history, cacheKey]);
+  async function loadOlder() {
+    if (!client || !history.nextCursor || olderLoading) return;
+    setOlderLoading(true);
+    setError('');
+    pinned.current = false;
+    try {
+      const page = await client.request<SessionHistory>(
+        'sessions/read',
+        { threadId: session.id, cursor: history.nextCursor },
+        project.deviceId,
+      );
+      prepending.current = { ...geometry.current };
+      setHistory((previous) => ({
+        ...previous,
+        items: mergeChatItems(page.items, previous.items),
+        nextCursor: page.nextCursor,
+      }));
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setOlderLoading(false);
+    }
+  }
+  async function pick() {
+    if (!client || uploading) return;
+    setError('');
+    setUploading(true);
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        multiple: true,
+        copyToCacheDirectory: true,
+      });
+      if (result.canceled) return;
+      if (files.length + result.assets.length > 6) throw new Error('一次最多添加 6 个附件');
+      for (const asset of result.assets) {
+        if ((asset.size ?? 0) > MAX_FILE_BYTES) throw new Error(`${asset.name} 超过 8 MB`);
+        let data: string;
+        if (Platform.OS === 'web' && asset.file)
+          data = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onerror = () => reject(new Error('读取附件失败'));
+            reader.onload = () => resolve(String(reader.result).split(',')[1]);
+            reader.readAsDataURL(asset.file!);
+          });
+        else
+          data = await FileSystem.readAsStringAsync(asset.uri, {
+            encoding: FileSystem.EncodingType.Base64,
+          });
+        if (data.length > Math.ceil(MAX_FILE_BYTES / 3) * 4)
+          throw new Error(`${asset.name} 超过 8 MB`);
+        const uploaded = await client.request<{ file: UploadedFile }>(
+          'attachments/upload',
+          {
+            projectId: project.id,
+            name: asset.name,
+            mimeType: asset.mimeType ?? 'application/octet-stream',
+            data,
+          },
+          project.deviceId,
+        );
+        if (alive.current) setFiles((previous) => [...previous, uploaded.file]);
+      }
+    } catch (e) {
+      if (alive.current) setError((e as Error).message);
+    } finally {
+      if (alive.current) setUploading(false);
+    }
+  }
+  async function send() {
+    if (
+      !client ||
+      !online ||
+      sending ||
+      uploading ||
+      history.activeTurnId ||
+      (!text.trim() && !files.length)
+    )
+      return;
+    const message = text.trim();
+    const signature = JSON.stringify([message, files.map((f) => f.id)]);
+    if (!attempt.current || attempt.current.signature !== signature)
+      attempt.current = {
+        signature,
+        key: `phone-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
+      };
+    // Persist the key before sending: an uncertain response must not trigger a
+    // second turn if the app closes or switches networks.
+    await saveCache(draftKey, { text, files, attempt: attempt.current }).catch(() => {});
+    setSending(true);
+    setError('');
+    pinned.current = true;
+    try {
+      await client.request(
+        'sessions/send',
+        {
+          threadId: session.id,
+          text: message,
+          attachmentIds: files.map((f) => f.id),
+          idempotencyKey: attempt.current.key,
+        },
+        project.deviceId,
+      );
+      if (alive.current) {
+        setText((previous) => (previous.trim() === message ? '' : previous));
+        setFiles([]);
+        attempt.current = null;
+      }
+    } catch (e) {
+      if (alive.current) setError((e as Error).message);
+    } finally {
+      if (alive.current) setSending(false);
+    }
+  }
+  async function stop() {
+    if (!client || stopping) return;
+    setStopping(true);
+    setError('');
+    try {
+      await client.request('sessions/stop', { threadId: session.id }, project.deviceId);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setStopping(false);
+    }
+  }
+  const running = !!history.activeTurnId;
+  return (
+    <KeyboardAvoidingView
+      style={styles.chat}
+      behavior={
+        Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined
+      }
+      testID="chat-screen"
+    >
+      <ScrollView
+        ref={scroll}
+        style={{ flex: 1 }}
+        contentContainerStyle={styles.messages}
+        keyboardShouldPersistTaps="handled"
+        scrollEventThrottle={100}
+        onScroll={(event) => {
+          const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+          geometry.current = { y: contentOffset.y, height: contentSize.height };
+          pinned.current = contentSize.height - contentOffset.y - layoutMeasurement.height < 100;
+        }}
+        onContentSizeChange={(_, height) => {
+          if (prepending.current) {
+            scroll.current?.scrollTo({
+              y: prepending.current.y + height - prepending.current.height,
+              animated: false,
+            });
+            prepending.current = null;
+          } else if (pinned.current) scroll.current?.scrollToEnd({ animated: false });
+          geometry.current.height = height;
+        }}
+      >
+        <View style={styles.chatWidth}>
+          {history.nextCursor && (
+            <Button
+              subtle
+              label={olderLoading ? '加载中…' : '查看更早消息'}
+              onPress={loadOlder}
+              disabled={!online || olderLoading}
+              style={{ alignSelf: 'center', marginBottom: 18 }}
+            />
+          )}
+          {loading && <ActivityIndicator color={palette.ink} style={{ marginTop: 45 }} />}
+          {!loading && !history.items.length && (
+            <View style={styles.empty}>
+              <Text style={styles.emptyTitle}>有什么可以帮你？</Text>
+              <Text style={styles.emptyHint}>继续思考，开始创造。</Text>
+            </View>
+          )}
+          {history.items.map((item) => (
+            <Message key={`${item.turnId}:${item.id}`} item={item} />
+          ))}
+          {history.requests.map((request) => (
+            <RequestPrompt
+              key={request.id}
+              request={request}
+              onRespond={async (action, answers) => {
+                if (!client) throw new Error('请先连接电脑');
+                await client.request(
+                  'requests/respond',
+                  { requestId: request.id, action, answers },
+                  project.deviceId,
+                );
+              }}
+            />
+          ))}
+          {running && (
+            <View style={styles.progress}>
+              <View style={styles.progressDot} />
+              <Text style={styles.progressText}>
+                {history.requests.length ? '等待你的回复' : 'Codex 正在工作…'}
+              </Text>
+            </View>
+          )}
+          {!!error && (
+            <View style={{ marginTop: 18 }}>
+              <Text selectable style={common.error}>
+                {error}
+              </Text>
+              <Pressable accessibilityRole="button" onPress={load} style={{ paddingVertical: 12 }}>
+                <Text style={styles.retry}>刷新会话</Text>
+              </Pressable>
+            </View>
+          )}
+        </View>
+      </ScrollView>
+      <View style={[styles.composerOuter, { paddingBottom: Math.max(12, insets.bottom) }]}>
+        <View style={styles.chatWidth}>
+          {(files.length > 0 || uploading) && (
+            <View style={styles.attachments}>
+              {files.map((file) => (
+                <View key={file.id} style={styles.fileChip}>
+                  <Text style={styles.fileName} numberOfLines={1}>
+                    {file.name}
+                  </Text>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={`移除附件 ${file.name}`}
+                    onPress={() => setFiles((previous) => previous.filter((f) => f.id !== file.id))}
+                    hitSlop={6}
+                  >
+                    <Icon name="close" size={14} color={palette.secondary} />
+                  </Pressable>
+                </View>
+              ))}
+              {uploading && <Text style={styles.progressText}>上传中…</Text>}
+            </View>
+          )}
+          <View style={styles.composer}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="添加附件"
+              onPress={pick}
+              disabled={!online || uploading || sending}
+              style={[styles.attachButton, (!online || uploading) && { opacity: 0.35 }]}
+            >
+              <Icon name="attach" size={22} color={palette.secondary} />
+            </Pressable>
+            <TextInput
+              accessibilityLabel="消息输入框"
+              placeholder="Message Codex…"
+              placeholderTextColor="#999"
+              multiline
+              value={text}
+              onChangeText={setText}
+              style={styles.input}
+              maxLength={200000}
+              onKeyPress={(event) => {
+                if (
+                  Platform.OS === 'web' &&
+                  event.nativeEvent.key === 'Enter' &&
+                  !(event as any).shiftKey &&
+                  !(event.nativeEvent as any).shiftKey &&
+                  !(event.nativeEvent as any).isComposing
+                ) {
+                  (event as any).preventDefault?.();
+                  void send();
+                }
+              }}
+            />
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={running ? '停止任务' : '发送消息'}
+              disabled={
+                running
+                  ? !online || stopping
+                  : !online || sending || uploading || (!text.trim() && !files.length)
+              }
+              onPress={running ? stop : send}
+              style={({ pressed }) => [
+                styles.sendButton,
+                (!online ||
+                  (!running && !text.trim() && !files.length) ||
+                  sending ||
+                  uploading) && { opacity: 0.22 },
+                pressed && { opacity: 0.7 },
+              ]}
+            >
+              {sending || stopping ? (
+                <ActivityIndicator color="white" size="small" />
+              ) : (
+                <Icon name={running ? 'stop' : 'send'} size={21} color="white" />
+              )}
+            </Pressable>
+          </View>
+          {!online && (
+            <Text style={styles.connectionHint}>
+              {clientState.status === 'reconnecting' || clientState.status === 'connecting'
+                ? '正在重新连接，任务会继续在电脑上运行'
+                : '电脑离线 · 已保存的消息仍可查看'}
+            </Text>
+          )}
+        </View>
+      </View>
+    </KeyboardAvoidingView>
+  );
+}
+const styles = StyleSheet.create({
+  chat: { flex: 1, backgroundColor: 'white' },
+  messages: { flexGrow: 1, paddingTop: 20, paddingBottom: 22 },
+  chatWidth: { width: '100%', maxWidth: 760, alignSelf: 'center', paddingHorizontal: 21 },
+  message: { marginVertical: 13, alignSelf: 'flex-start', maxWidth: '100%' },
+  messageText: { fontSize: 16, lineHeight: 26, color: palette.ink },
+  userMessage: {
+    alignSelf: 'flex-end',
+    backgroundColor: palette.soft,
+    borderRadius: 19,
+    paddingVertical: 11,
+    paddingHorizontal: 16,
+    maxWidth: '88%',
+    marginTop: 22,
+    marginBottom: 18,
+  },
+  attachedNames: { fontSize: 12, color: palette.muted, marginTop: 9 },
+  execution: { marginVertical: 6 },
+  executionHeading: { flexDirection: 'row', alignItems: 'center', gap: 9, paddingVertical: 8 },
+  executionDot: { width: 4, height: 4, borderRadius: 2, backgroundColor: '#999' },
+  executionTitle: { flex: 1, fontSize: 12, lineHeight: 19, color: palette.secondary },
+  executionBody: {
+    marginLeft: 13,
+    marginTop: 2,
+    paddingVertical: 10,
+    paddingHorizontal: 11,
+    backgroundColor: '#fafafa',
+    borderRadius: 5,
+  },
+  executionOutput: { fontSize: 11, lineHeight: 18, color: palette.secondary },
+  mono: { fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
+  empty: { flex: 1, paddingTop: 130, paddingBottom: 70, alignItems: 'center' },
+  emptyTitle: { fontSize: 26, fontWeight: '600', letterSpacing: -0.6, color: palette.ink },
+  emptyHint: { fontSize: 13, color: '#999', marginTop: 13 },
+  progress: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingTop: 17,
+    paddingBottom: 6,
+  },
+  progressDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: '#777' },
+  progressText: { fontSize: 12, color: palette.muted },
+  composerOuter: { backgroundColor: 'white', paddingTop: 10 },
+  composer: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    minHeight: 54,
+    borderRadius: 27,
+    borderWidth: 1,
+    borderColor: '#dedede',
+    padding: 5,
+  },
+  attachButton: { height: 42, width: 38, alignItems: 'center', justifyContent: 'center' },
+  input: {
+    flex: 1,
+    fontSize: 15,
+    lineHeight: 23,
+    maxHeight: 145,
+    minHeight: 42,
+    paddingVertical: 9,
+    paddingHorizontal: 8,
+    color: palette.ink,
+    textAlignVertical: 'center',
+  },
+  sendButton: {
+    width: 42,
+    height: 42,
+    borderRadius: 23,
+    backgroundColor: palette.ink,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  attachments: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, paddingBottom: 12 },
+  fileChip: {
+    flexDirection: 'row',
+    gap: 8,
+    alignItems: 'center',
+    backgroundColor: palette.soft,
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    maxWidth: 230,
+  },
+  fileName: { fontSize: 12, color: palette.secondary, flexShrink: 1 },
+  connectionHint: { fontSize: 10, textAlign: 'center', color: palette.muted, marginTop: 8 },
+  retry: { fontSize: 12, color: palette.secondary },
+  prompt: {
+    paddingVertical: 22,
+    marginVertical: 14,
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: palette.line,
+  },
+  promptTitle: { color: palette.ink, fontSize: 16, fontWeight: '600' },
+  promptDescription: { color: palette.secondary, fontSize: 14, lineHeight: 23, marginTop: 10 },
+  promptCommand: { fontSize: 12, lineHeight: 20, color: palette.secondary, marginTop: 15 },
+  promptActions: { flexDirection: 'row', gap: 7, marginTop: 20 },
+  answerOption: {
+    borderWidth: 1,
+    borderColor: '#ddd',
+    borderRadius: 7,
+    padding: 13,
+    marginTop: 10,
+  },
+  optionLabel: { fontSize: 14, color: palette.ink },
+  optionDescription: { fontSize: 12, lineHeight: 19, color: palette.muted, marginTop: 4 },
+});

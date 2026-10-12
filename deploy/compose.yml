@@ -1,0 +1,30 @@
+services:
+  relay:
+    build:
+      context: ..
+      dockerfile: deploy/relay.Dockerfile
+    restart: unless-stopped
+    environment:
+      REMOTE_TOKEN: ${REMOTE_TOKEN:?Set a pairing key of at least 16 characters}
+    volumes:
+      - relay-data:/data
+    expose:
+      - "8787"
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      REMOTE_DOMAIN: ${REMOTE_DOMAIN:?Set your relay domain}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - relay
+volumes:
+  relay-data:
+  caddy-data:
+  caddy-config:

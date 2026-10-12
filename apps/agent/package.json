@@ -1,0 +1,1 @@
+{ "name": "@codex-remote/agent", "version": "0.1.0", "private": true, "type": "module", "dependencies": { "@codex-remote/protocol": "*" } }
