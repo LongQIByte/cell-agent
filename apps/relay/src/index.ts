@@ -9,6 +9,7 @@ const relay = createRelay({
   port: Number(process.env.RELAY_PORT ?? 8787),
   webDir: resolve(process.env.WEB_DIR ?? 'apps/mobile/dist'),
   apkPath: resolve('artifacts/codex-remote.apk'),
+  devApkPath: resolve('artifacts/codex-remote-dev.apk'),
   tls:
     process.env.TLS_CERT && process.env.TLS_KEY
       ? { cert: process.env.TLS_CERT, key: process.env.TLS_KEY }

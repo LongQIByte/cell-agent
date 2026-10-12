@@ -26,6 +26,7 @@ export interface RelayOptions {
   port?: number;
   webDir?: string;
   apkPath?: string;
+  devApkPath?: string;
   tls?: { cert: string; key: string };
   requestTimeoutMs?: number;
 }
@@ -131,15 +132,16 @@ export function createRelay(options: RelayOptions) {
       return;
     }
     let file: string | undefined;
-    if (pathname === '/downloads/codex-remote.apk') {
-      if (!options.apkPath || !existsSync(options.apkPath)) {
+    if (pathname === '/downloads/codex-remote.apk' || pathname === '/downloads/codex-remote-dev.apk') {
+      const apk = pathname.endsWith('codex-remote-dev.apk') ? options.devApkPath : options.apkPath;
+      if (!apk || !existsSync(apk)) {
         res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
         res.end('APK 尚未准备好。');
         return;
       }
-      file = options.apkPath;
+      file = apk;
       res.setHeader('Content-Type', 'application/vnd.android.package-archive');
-      res.setHeader('Content-Disposition', 'attachment; filename="codex-remote.apk"');
+      res.setHeader('Content-Disposition', `attachment; filename="${pathname.slice('/downloads/'.length)}"`);
     } else if (options.webDir && existsSync(options.webDir)) {
       const root = realpathSync(options.webDir);
       const candidate = resolve(root, `.${pathname}`);

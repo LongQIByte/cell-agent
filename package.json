@@ -20,6 +20,8 @@
     "test": "node --import tsx --test tests/*.test.ts",
     "test:browser": "playwright test",
     "android:build": "bash scripts/build-android.sh",
+    "android:build:dev": "bash scripts/build-android.sh --dev",
+    "android:dev:open": "node scripts/open-android-dev.mjs",
     "connection": "node scripts/connection.mjs"
   },
   "dependencies": {

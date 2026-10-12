@@ -33,7 +33,7 @@ export function configuration() {
   const file = resolve(directory, 'connection.json');
   const old = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {};
   const token = process.env.REMOTE_TOKEN ?? old.token ?? randomBytes(24).toString('base64url');
-  const port = Number(process.env.RELAY_PORT ?? 8787);
+  const port = Number(process.env.RELAY_PORT ?? old.port ?? 8787);
   const host = lanHost();
   const tls = !!process.env.TLS_CERT;
   const config = {
@@ -44,6 +44,9 @@ export function configuration() {
     server: `${tls ? 'wss' : 'ws'}://${host}:${port}/ws`,
     web: `${tls ? 'https' : 'http'}://${host}:${port}`,
     apk: `${tls ? 'https' : 'http'}://${host}:${port}/downloads/codex-remote.apk`,
+    devApk: `${tls ? 'https' : 'http'}://${host}:${port}/downloads/codex-remote-dev.apk`,
+    metro: `http://${host}:8081`,
+    devClient: `codex-remote-dev://expo-development-client/?url=${encodeURIComponent(`http://${host}:8081`)}`,
   };
   writeFileSync(file, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
   chmodSync(file, 0o600);
