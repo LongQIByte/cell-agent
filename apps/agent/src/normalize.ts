@@ -1,6 +1,7 @@
 import { basename } from 'node:path';
 import { RemoteError, type ChatItem, type Session } from '@codex-remote/protocol';
 import { itemImages } from './message-images.js';
+import { executionDiagnostics } from './execution-diagnostics.js';
 export function sessionFrom(thread: any): Session {
   if (thread.projectId !== null && typeof thread.projectId !== 'string')
     throw new RemoteError(
@@ -78,7 +79,7 @@ export function normalizeItem(
         kind: 'command',
         text: item.command ?? '执行命令',
         details:
-          `${item.aggregatedOutput ?? ''}${item.exitCode === null || item.exitCode === undefined ? '' : `\n退出码：${item.exitCode}`}`.slice(
+          `${item.aggregatedOutput ?? ''}${executionDiagnostics(item.command ?? '', item.aggregatedOutput ?? '', item.exitCode)}${item.exitCode === null || item.exitCode === undefined ? '' : `\n退出码：${item.exitCode}`}`.slice(
             -100000,
           ),
       };
