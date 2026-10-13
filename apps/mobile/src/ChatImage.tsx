@@ -1,7 +1,10 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { ActivityIndicator, Image, Modal, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import type { RemoteClient } from './client';
-import { Button, useUI, useThemedStyles, type Palette } from './ui';
+import { useUI, useThemedStyles, type Palette } from './ui';
+
+import { ImagePreview } from './ImagePreview';
+import { openRemoteFile, closeRemoteFile, type RemoteFile } from './remote-file';
 
 export const MessageImageContext = createContext<{
   client: RemoteClient | null; deviceId: string; threadId: string; online: boolean;
@@ -20,6 +23,7 @@ export function ChatImage({ source, name = '图片' }: { source: string; name?: 
   const [uri, setUri] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
+  const [error, setError] = useState('');
   const [preview, setPreview] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const client = connection?.client;
@@ -28,14 +32,21 @@ export function ChatImage({ source, name = '图片' }: { source: string; name?: 
   const online = connection?.online;
   useEffect(() => {
     let alive = true;
+    let file: RemoteFile | undefined;
+    setError('');
     setUri(null); setFailed(false); setLoading(true);
     if (/^(?:https?:\/\/|data:image\/(?:png|jpeg|webp|gif);base64,)/i.test(source)) setUri(source);
     else if (client && online && threadId && deviceId) {
-      void client.request<{ mimeType: string; data: string }>('images/read', { threadId, source }, deviceId)
-        .then((image) => { if (alive) setUri(`data:${image.mimeType};base64,${image.data}`); })
-        .catch(() => { if (alive) { setFailed(true); setLoading(false); } });
+      void openRemoteFile(client, deviceId, threadId, source)
+        .then((image) => {
+          if (!alive) { closeRemoteFile(client, image); return; }
+          file = image;
+          if (!image.mimeType.startsWith('image/')) throw new Error('文件格式不是支持的图片');
+          setUri(image.uri);
+        })
+        .catch((error: Error) => { if (alive) { setError(error.message); setFailed(true); setLoading(false); } });
     } else { setFailed(true); setLoading(false); }
-    return () => { alive = false; };
+    return () => { alive = false; if (file && client) closeRemoteFile(client, file); };
   }, [source, client, online, threadId, deviceId, attempt]);
   useEffect(() => {
     let alive = true;
@@ -51,15 +62,9 @@ export function ChatImage({ source, name = '图片' }: { source: string; name?: 
       {uri && !failed && <Image key={attempt} accessibilityLabel={`聊天图片 ${name}`} source={{ uri }} resizeMode="contain" style={styles.image}
         onLoad={() => setLoading(false)} onError={() => { setFailed(true); setLoading(false); }} />}
       {loading && <ActivityIndicator style={StyleSheet.absoluteFill} color={palette.muted} />}
-      {failed && <Text style={styles.hint}>图片加载失败，点击重试</Text>}
+      {failed && <Text style={styles.hint}>{error || (online ? '图片加载失败' : '电脑已离线')}，点击重试</Text>}
     </Pressable>
-    <Modal visible={preview} transparent animationType="fade" onRequestClose={() => setPreview(false)}>
-      <View style={styles.overlay}>
-        {uri && <Image accessibilityLabel={`大图 ${name}`} source={{ uri }} resizeMode="contain" style={styles.preview} />}
-        <Text style={styles.name}>{name}</Text>
-        <Button label="关闭图片预览" onPress={() => setPreview(false)} />
-      </View>
-    </Modal>
+    {preview && uri && <ImagePreview uri={uri} name={name} onClose={() => setPreview(false)} />}
   </View>;
 }
 const createStyles = (palette: Palette) => StyleSheet.create({

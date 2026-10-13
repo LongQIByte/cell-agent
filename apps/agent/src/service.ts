@@ -25,7 +25,8 @@ import { sessionFrom, normalizeItem, mergeItems } from './normalize.js';
 import { readDesktopMembership, desktopSession } from './desktop-membership.js';
 import { settingsFromNotification, settingsFromResume, permissionPreset, type SessionSettings } from './session-settings.js';
 import { assistantOutput, beginMetrics, updateTokenUsage, type MetricsSnapshot } from './run-metrics.js';
-import { imageMime, imagePath, markdownImageSources } from './message-images.js';
+import { markdownImageSources } from './message-images.js';
+import { SessionFiles, markdownFileSources, FILE_CHUNK_BYTES } from './session-files.js';
 
 interface Catalogue {
   projects: Project[];
@@ -50,6 +51,7 @@ export class AgentService extends EventEmitter {
   private closed = false;
   private active = new Map<string, string>();
   private runtime = new Map<string, ChatItem[]>();
+  private files = new SessionFiles();
   private imageSources = new Map<string, Map<string, string>>();
   private settings = new Map<string, SessionSettings>();
   private sending = new Set<string>();
@@ -187,7 +189,7 @@ export class AgentService extends EventEmitter {
         sources.set(source, image.source);
         return { ...image, source };
       });
-      for (const source of markdownImageSources(normalized.text)) sources.set(source, source);
+      for (const source of [...markdownImageSources(normalized.text), ...markdownFileSources(normalized.text)]) sources.set(source, source);
       this.imageSources.set(threadId, sources);
     }
     return normalized;
@@ -677,49 +679,38 @@ export class AgentService extends EventEmitter {
   }
   async handle(method: string, raw: JsonRecord): Promise<unknown> {
     await this.codex.ready;
-    if (method === 'images/read') {
+    if (method === 'files/open') {
       const p = z.object({ threadId: idSchema, source: z.string().min(1).max(8192) }).parse(raw);
       const { thread } = await this.codex.call('thread/read', { threadId: p.threadId });
       await this.localSession(thread);
       let source = this.imageSources.get(p.threadId)?.get(p.source);
-      // A streamed Markdown image may be displayed before item/completed.
       if (!source && (this.runtime.get(p.threadId) ?? []).some((item) =>
-        item.kind === 'assistant' && markdownImageSources(item.text).includes(p.source))) source = p.source;
-      if (!source) {
-        await this.readSession(p.threadId);
-        source = this.imageSources.get(p.threadId)?.get(p.source);
-      }
-      if (!source) throw new RemoteError('IMAGE_NOT_IN_SESSION', '图片不属于此会话');
-      let data: Buffer;
-      if (source.startsWith('data:')) {
-        const match = /^data:image\/(?:png|jpeg|webp|gif);base64,([A-Za-z0-9+/]*={0,2})$/.exec(source);
-        if (!match) throw new RemoteError('INVALID_IMAGE', '图片格式不支持');
-        if (match[1].length > Math.ceil(MAX_FILE_BYTES / 3) * 4) throw new RemoteError('FILE_TOO_LARGE', '图片不能超过 8 MB');
-        data = Buffer.from(match[1], 'base64');
-      } else {
-        if (/^[a-z][a-z0-9+.-]*:/i.test(source) && !/^(?:file:|sandbox:|[a-z]:[\\/])/i.test(source))
-          throw new RemoteError('INVALID_IMAGE', '图片来源不支持');
-        const path = await realpath(imagePath(source, thread.cwd)).catch(() => {
-          throw new RemoteError('IMAGE_MISSING', '电脑上的图片不存在');
+        item.kind === 'assistant' && [...markdownImageSources(item.text), ...markdownFileSources(item.text)].includes(p.source))) source = p.source;
+      // Search native history without resuming a writer or changing the UI's
+      // history window. Images in older turns remain readable after restart.
+      let cursor: string | null = null;
+      const seen = new Set<string>();
+      while (!source) {
+        const page: any = await this.codex.call('thread/turns/list', {
+          threadId: p.threadId, cursor, limit: 50, sortDirection: 'desc', itemsView: 'full',
         });
-        const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-        try {
-          const info = await handle.stat();
-          if (!info.isFile()) throw new RemoteError('INVALID_IMAGE', '图片不是文件');
-          if (info.size > MAX_FILE_BYTES) throw new RemoteError('FILE_TOO_LARGE', '图片不能超过 8 MB');
-          const buffer = Buffer.alloc(info.size);
-          let offset = 0;
-          while (offset < buffer.length) {
-            const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
-            if (!bytesRead) break;
-            offset += bytesRead;
-          }
-          data = buffer.subarray(0, offset);
-        } finally { await handle.close(); }
+        for (const turn of page.data) for (const item of turn.items ?? []) this.normalize(item, turn.id, undefined, p.threadId);
+        source = this.imageSources.get(p.threadId)?.get(p.source);
+        cursor = page.nextCursor;
+        if (!cursor || seen.has(cursor)) break;
+        seen.add(cursor);
       }
-      const mimeType = imageMime(data);
-      if (!mimeType) throw new RemoteError('INVALID_IMAGE', '图片格式不支持');
-      return { mimeType, data: data.toString('base64') };
+      if (!source) throw new RemoteError('FILE_NOT_IN_SESSION', '文件链接不属于此会话');
+      return this.files.create(source, thread.cwd);
+    }
+    if (method === 'files/read') {
+      const p = z.object({ id: idSchema, offset: z.number().int().min(0), length: z.number().int().min(1).max(FILE_CHUNK_BYTES) }).parse(raw);
+      return this.files.read(p.id, p.offset, p.length);
+    }
+    if (method === 'files/close') {
+      const p = z.object({ id: idSchema }).parse(raw);
+      this.files.release(p.id);
+      return {};
     }
     if (method === 'projects/list') {
       const { archived } = z.object({ archived: z.boolean().default(false) }).parse(raw);
@@ -1095,6 +1086,7 @@ export class AgentService extends EventEmitter {
     throw new RemoteError('METHOD_NOT_FOUND', `不支持的操作：${method}`);
   }
   close() {
+    this.files.close();
     if (this.closed) return;
     this.closed = true;
     for (const pending of this.pendingRequests.values()) clearTimeout(pending.timer);

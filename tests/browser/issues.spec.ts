@@ -137,7 +137,7 @@ test('local Markdown, tool and sent photos render inside chat, preview, retry an
   const reply = page.getByRole('img', { name: '聊天图片 回复图片', exact: true });
   await expect(reply).toBeVisible();
   await expect.poll(() => reply.evaluate((element) => (element as HTMLImageElement).naturalWidth)).toBe(1);
-  expect(fixture.calls.find((call) => call.method === 'images/read')?.params).toEqual({ threadId: 'native-0', source: 'reply.png' });
+  expect(fixture.calls.find((call) => call.method === 'files/open')?.params).toEqual({ threadId: 'native-0', source: 'reply.png' });
   await page.getByRole('button', { name: '预览图片 回复图片', exact: true }).click();
   await expect(page.getByRole('img', { name: '大图 回复图片', exact: true })).toBeVisible();
   await page.getByRole('button', { name: '关闭图片预览', exact: true }).click();
@@ -152,7 +152,7 @@ test('local Markdown, tool and sent photos render inside chat, preview, retry an
   await expect(page.getByRole('img', { name: '聊天图片 photo.png', exact: true })).toBeVisible();
   fixture.imageItem({ id: 'missing-image', turnId: 'image-turn', kind: 'assistant', text: '![缺失图片](missing.png)', timestamp: 1000 });
   await page.getByRole('button', { name: '重试图片 缺失图片', exact: true }).click();
-  await expect.poll(() => fixture.calls.filter((call) => call.method === 'images/read' && call.params.source === 'missing.png').length).toBe(2);
+  await expect.poll(() => fixture.calls.filter((call) => call.method === 'files/open' && call.params.source === 'missing.png').length).toBe(2);
   for (const width of [320, 390, 820]) {
     await page.setViewportSize({ width, height: 844 });
     const box = (await reply.boundingBox())!;
@@ -192,6 +192,7 @@ const markdown = [
 ].join('\n');
 
 async function connectFixture(page: Page, large = false) {
+  await page.route('**/files/**', (route) => route.fulfill({ contentType: 'image/png', body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==', 'base64') }));
   const devices: Device[] = Array.from({ length: 45 }, (_, index) => ({
     id: `machine-${index}`, name: `Mac ${String(index).padStart(2, '0')}`, platform: 'darwin',
     online: index !== 44, lastSeen: Date.now(),
@@ -316,12 +317,12 @@ async function connectFixture(page: Page, large = false) {
         }
         case 'sessions/goal/clear': goals.delete(message.params.threadId); result = { goal: null }; break;
         case 'attachments/upload': result = { file: { id: `file-${calls.length}`, name: message.params.name, mimeType: message.params.mimeType, size: 64 } }; break;
-        case 'images/read':
+        case 'files/open':
           if (message.params.source === 'missing.png') {
             socket.send(JSON.stringify({ type: 'response', id: message.id, error: { code: 'IMAGE_MISSING', message: '电脑上的图片不存在' } }));
             return;
           }
-          result = { mimeType: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==' };
+          result = { ticket: 'fixture-image', name: message.params.source, size: 64, mimeType: 'image/png', expiresAt: Date.now() + 900000 };
           break;
         case 'sessions/archive': archives.add(`${message.deviceId}:${message.params.threadId}`); result = {}; break;
         case 'sessions/unarchive': archives.delete(`${message.deviceId}:${message.params.threadId}`); result = {}; break;
@@ -763,4 +764,19 @@ test('an uncertain steering submission retains its original target and key after
   expect(steers).toHaveLength(2);
   expect(steers[1].params).toEqual(steers[0].params);
   expect(fixture.calls.filter((call) => call.method === 'sessions/send' || call.method === 'sessions/stop')).toHaveLength(0);
+});
+
+test('completed replies copy the exact Markdown and keep tool logs and other replies separate', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  const fixture = await connectFixture(page);
+  await page.getByRole('button', { name: '打开会话 Native session 1', exact: true }).click();
+  const text = '中文完整回复\n\n- 第一项\n- 第二项\n\n```python\n  print("hello")\n```';
+  fixture.imageItem({ id: 'copy-final', turnId: 'copy-turn', kind: 'assistant', text, timestamp: 1000 });
+  const message = page.getByTestId('assistant-message').filter({ hasText: '中文完整回复' });
+  await message.getByRole('button', { name: '复制完整回复' }).click();
+  await expect(message.getByText('已复制', { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(text);
+  await page.reload();
+  await message.getByRole('button', { name: '复制完整回复' }).click();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(text);
 });

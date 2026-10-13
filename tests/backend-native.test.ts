@@ -1,3 +1,11 @@
+async function readSessionImage(service: AgentService, params: { threadId: string; source: string }) {
+  const file: any = await service.handle('files/open', params);
+  try {
+    if (!file.mimeType.startsWith('image/')) throw new Error('文件格式不是图片');
+    const chunk: any = await service.handle('files/read', { id: file.id, offset: 0, length: Math.max(1, Math.min(file.size, 256 * 1024)) });
+    return { mimeType: file.mimeType, data: chunk.data };
+  } finally { await service.handle('files/close', { id: file.id }); }
+}
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
@@ -114,19 +122,19 @@ test('chat images survive history reload and tool completion, with reads limited
     assert.ok(generated.startsWith('codex-image:'));
     assert.ok(!JSON.stringify(history).includes(png.toString('base64')));
     for (const source of [join(root, 'photo.png'), 'photo.png', generated]) {
-      assert.deepEqual(await service.handle('images/read', { threadId: 'one', source }), { mimeType: 'image/png', data: png.toString('base64') });
+      assert.deepEqual(await readSessionImage(service, { threadId: 'one', source }), { mimeType: 'image/png', data: png.toString('base64') });
     }
-    await assert.rejects(service.handle('images/read', { threadId: 'two', source: join(root, 'photo.png') }), /图片不属于此会话/);
-    await assert.rejects(service.handle('images/read', { threadId: 'one', source: join(root, 'secret.txt') }), /图片不属于此会话/);
-    await assert.rejects(service.handle('images/read', { threadId: 'one', source: 'secret.txt' }), /图片格式不支持/);
+    await assert.rejects(readSessionImage(service, { threadId: 'two', source: join(root, 'photo.png') }), /文件链接不属于此会话/);
+    await assert.rejects(readSessionImage(service, { threadId: 'one', source: join(root, 'secret.txt') }), /文件链接不属于此会话/);
+    await assert.rejects(readSessionImage(service, { threadId: 'one', source: 'secret.txt' }), /文件格式不是图片/);
     native.emit('notification', { method: 'item/completed', params: { threadId: 'one', turnId: 'live-turn', item: {
       type: 'dynamicToolCall', id: 'tool', tool: 'view_image', contentItems: [{ type: 'image', imageUrl: `data:image/png;base64,${png.toString('base64')}` }],
     } } });
     const tool = (await service.readSession('one')).items.find((item) => item.id === 'tool')!;
-    assert.equal((await service.handle('images/read', { threadId: 'one', source: tool.images![0].source }) as any).data, png.toString('base64'));
+    assert.equal((await readSessionImage(service, { threadId: 'one', source: tool.images![0].source }) as any).data, png.toString('base64'));
     service.close();
     service = new AgentService(native as unknown as CodexRpc, new AgentStore(':memory:'), 'machine', root);
-    assert.equal((await service.handle('images/read', { threadId: 'one', source: generated }) as any).mimeType, 'image/png');
+    assert.equal((await readSessionImage(service, { threadId: 'one', source: generated }) as any).mimeType, 'image/png');
     assert.equal(normalizeItem({ type: 'mcpToolCall', id: 'mcp', result: { content: [{ type: 'image', mimeType: 'image/png', data: png.toString('base64') }] } }, 'turn')!.images!.length, 1);
     assert.deepEqual(markdownImageSources('![space](<photo with space.png>)\n```\n![example](secret.png)\n```'), ['photo with space.png']);
   } finally { service.close(); await rm(root, { recursive: true, force: true }); }
@@ -676,4 +684,26 @@ test('thread-bound uploads persist across restart without authorizing another sa
     service.close();
     await rm(workspace, { recursive: true, force: true });
   }
+});
+
+test('file access searches older history without resuming the active writer, and rejects unreferenced paths across sessions', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cell-agent-old-files-'));
+  await writeFile(join(root, '报告 one.txt'), '历史文件');
+  const native = new NativeCodex(); native.threads = [thread('one', root, null), thread('two', root, null)];
+  const call = native.call.bind(native);
+  native.call = async (method, params) => {
+    if (method === 'thread/resume') throw new Error('should never resume the writer for a file');
+    if (method === 'thread/turns/list') return params.threadId === 'one' && params.cursor === 'older'
+      ? { data: [{ id: 'old', items: [{ type: 'agentMessage', id: 'report', text: '[报告](<报告 one.txt>)' }] }], nextCursor: null }
+      : { data: [], nextCursor: params.threadId === 'one' ? 'older' : null };
+    return call(method, params);
+  };
+  const service = new AgentService(native as unknown as CodexRpc, new AgentStore(':memory:'), 'machine', root);
+  try {
+    const file: any = await service.handle('files/open', { threadId: 'one', source: '报告 one.txt' });
+    const chunk: any = await service.handle('files/read', { id: file.id, offset: 0, length: 1024 });
+    assert.equal(Buffer.from(chunk.data, 'base64').toString(), '历史文件');
+    await assert.rejects(service.handle('files/open', { threadId: 'two', source: '报告 one.txt' }), /不属于此会话/);
+    await assert.rejects(service.handle('files/open', { threadId: 'one', source: '../secret.txt' }), /不属于此会话/);
+  } finally { service.close(); await rm(root, { recursive: true, force: true }); }
 });
