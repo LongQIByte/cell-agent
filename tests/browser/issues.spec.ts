@@ -233,6 +233,9 @@ async function connectFixture(page: Page, large = false) {
   const modes = new Map<string, string>();
   const goals = new Map<string, any>();
   const imageItems: ChatItem[] = [];
+  const outbox: any[] = [];
+  const activeTurns = new Map<string, string>();
+  let loseSteerAck = false;
   let historyPages: { items: ChatItem[]; nextCursor: string | null }[] | undefined;
   await page.routeWebSocket('**/ws', (socket) => {
     sockets.push(socket);
@@ -264,10 +267,22 @@ async function connectFixture(page: Page, large = false) {
           const selected = [...projects.flatMap((p) => p.sessions), ...recentSessions.map((entry) => entry.session)].find((item) => item.id === message.params.threadId)!;
           const settings = settingsByThread.get(message.params.threadId) ?? { model: 'model-a', reasoningEffort: 'medium', permissions: fullPermissions };
           result = { session: selected, ...settings, mode: modes.get(selected.id) ?? 'default', goal: goals.get(selected.id) ?? null,
-            capabilities: { plan: true, goal: true, goalBudget: true }, items: [{ id: 'markdown', turnId: 'fixture-turn', kind: 'assistant', text: markdown, timestamp: 1000 }, ...imageItems], nextCursor: null, activeTurnId: null, requests: [], sequence,
+            capabilities: { plan: true, goal: true, goalBudget: true }, items: [{ id: 'markdown', turnId: 'fixture-turn', kind: 'assistant', text: markdown, timestamp: 1000 }, ...imageItems], nextCursor: null, activeTurnId: activeTurns.get(selected.id) ?? null, outbox, requests: [], sequence,
             ...(historyPages?.[Number(message.params.cursor ?? 0)]) };
           break;
         }
+        case 'sessions/enqueue':
+          if (!outbox.some((item) => item.id === message.params.idempotencyKey)) outbox.push({
+            id: message.params.idempotencyKey, text: message.params.text, attachmentNames: [], status: 'queued',
+          });
+          socket.send(JSON.stringify({ type: 'event', method: 'session/outbox', deviceId: message.deviceId,
+            params: { threadId: message.params.threadId, outbox, sequence: ++sequence } }));
+          result = { queued: true }; break;
+        case 'sessions/steer':
+          if (loseSteerAck) {
+            loseSteerAck = false; activeTurns.delete(message.params.threadId); socket.close(); return;
+          }
+          result = { turnId: activeTurns.get(message.params.threadId) }; break;
         case 'sessions/send':
           if (message.params.mode) modes.set(message.params.threadId, message.params.mode);
           settingsByThread.set(message.params.threadId, {
@@ -323,6 +338,12 @@ async function connectFixture(page: Page, large = false) {
   await page.goto('/');
   await expect(page.getByRole('button', { name: '项目 Native Group，Mac 00', exact: true })).toBeVisible();
   return { calls, projects, recentSessions, sockets,
+    loseSteerAck: () => { loseSteerAck = true; },
+    running: (threadId: string, turnId: string) => {
+      activeTurns.set(threadId, turnId);
+      sockets.at(-1)!.send(JSON.stringify({ type: 'event', method: 'session/status', deviceId: devices[0].id,
+        params: { threadId, turnId, status: 'inProgress', sequence: ++sequence } }));
+    },
     historyPages: (pages: NonNullable<typeof historyPages>) => { historyPages = pages; },
     imageItem: (item: ChatItem) => {
       imageItems.push(item);
@@ -676,4 +697,50 @@ test('long-press manages project and recent conversations; pins lead their own l
     .toEqual(['native-6', 'recent-0']);
   expect(fixture.calls.filter((call) => call.method === 'sessions/unarchive').map((call) => call.params.threadId))
     .toEqual(['native-6', 'recent-0']);
+});
+
+test('running composer queues multiple messages, restores queue after reload and submits native steering without stop', async ({ page }) => {
+  const fixture = await connectFixture(page);
+  await page.getByRole('button', { name: '打开会话 Native session 1', exact: true }).click();
+  fixture.running('native-0', 'running-turn');
+  const input = page.getByRole('textbox', { name: '消息输入框', exact: true });
+  for (const text of ['补充一', '补充二']) {
+    await input.fill(text);
+    await page.getByRole('button', { name: '提交排队消息', exact: true }).click();
+    await expect(input).toHaveValue('');
+    await expect(page.getByText(`排队中 · ${text}`, { exact: true })).toBeVisible();
+  }
+  await page.reload();
+  await expect(page.getByText('排队中 · 补充一', { exact: true })).toBeVisible();
+  await expect(page.getByText('排队中 · 补充二', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '立即补充', exact: true }).click();
+  await input.fill('立即调整');
+  await page.getByRole('button', { name: '立即发送补充', exact: true }).click();
+  await expect(input).toHaveValue('');
+  const steer = fixture.calls.find((call) => call.method === 'sessions/steer')!;
+  expect(steer.params.expectedTurnId).toBe('running-turn');
+  expect(steer.params.text).toBe('立即调整');
+  for (const setting of ['model', 'effort', 'mode', 'permissionMode']) expect(steer.params[setting]).toBeUndefined();
+  expect(fixture.calls.filter((call) => call.method === 'sessions/enqueue')).toHaveLength(2);
+  expect(fixture.calls.filter((call) => call.method === 'sessions/send' || call.method === 'sessions/stop')).toHaveLength(0);
+  await expect(page.getByRole('button', { name: '停止任务', exact: true })).toBeVisible();
+});
+
+test('an uncertain steering submission retains its original target and key after the turn ends during disconnect', async ({ page }) => {
+  const fixture = await connectFixture(page);
+  await page.getByRole('button', { name: '打开会话 Native session 1', exact: true }).click();
+  fixture.running('native-0', 'running-turn');
+  await page.getByRole('button', { name: '立即补充', exact: true }).click();
+  const input = page.getByRole('textbox', { name: '消息输入框', exact: true });
+  await input.fill('保留不确定提交');
+  fixture.loseSteerAck();
+  await page.getByRole('button', { name: '立即发送补充', exact: true }).click();
+  await expect(input).toHaveValue('保留不确定提交');
+  await expect(page.getByRole('button', { name: '发送消息', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: '发送消息', exact: true }).click();
+  await expect(input).toHaveValue('');
+  const steers = fixture.calls.filter((call) => call.method === 'sessions/steer');
+  expect(steers).toHaveLength(2);
+  expect(steers[1].params).toEqual(steers[0].params);
+  expect(fixture.calls.filter((call) => call.method === 'sessions/send' || call.method === 'sessions/stop')).toHaveLength(0);
 });

@@ -25,3 +25,14 @@ Goal 使用 `thread/goal/get`、`set`、`clear` 原生接口，明确传入 `ori
 - 指标按机器和会话隔离，Agent 本地 SQLite 保留快照，断线后以带序号的快照和事件恢复，旧事件不重复累加。
 
 协议依据：[官方 App Server 文档](https://developers.openai.com/codex/app-server)、[Goals 说明](https://developers.openai.com/cookbook/examples/codex/using_goals_in_codex)。实现以本机 `codex-cli 0.162.0-alpha.17.2` 生成的类型为准。
+
+## 执行中补充消息
+
+执行时输入框继续可用，可选择：
+
+- **排队发送**：在电脑端保存消息及附件，当前任务结束后按提交顺序发起下一轮。关闭手机、离开会话或断线不会删除队列；电脑服务重启后恢复队列。
+- **立即补充**：使用 Codex 原生 `turn/steer` 将输入交给当前 turn，不停止任务，也不创建替代 turn。沿用当前任务的模型、权限和模式；若目标 turn 已结束，明确报错并保留草稿。
+
+队列显示排队中、提交中、已接受、发送失败和结果待确认。明确失败可重试，失败的队首会阻止后续消息越过它。结果待确认的消息不会自动重发；刷新会话后依据 Codex 的用户消息 ID 核实是否已接受。停止任务是独立按钮。
+
+电脑服务和手机应用均需使用包含该功能的版本。使用 Codex Remote Dev 热更新手机界面；后端更新需重启电脑服务。

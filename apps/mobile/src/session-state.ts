@@ -49,6 +49,8 @@ export function applySessionEvent(
     next.reasoningEffort = p.reasoningEffort;
     next.permissions = p.permissions;
     next.permissionsUnavailableReason = p.permissionsUnavailableReason;
+  } else if (event.method === 'session/outbox') {
+    next.outbox = p.outbox;
   } else if (event.method === 'session/metrics') {
     next.metrics = p.metrics;
   } else if (event.method === 'session/goal') {
