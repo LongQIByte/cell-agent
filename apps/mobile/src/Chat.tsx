@@ -34,6 +34,7 @@ import { Button, useUI, useThemedStyles, type Palette } from './ui';
 import { MarkdownMessage } from './MarkdownMessage';
 import { TurnSettingsPicker } from './TurnSettingsPicker';
 import { Attachments } from './Attachments';
+import { MessageOutbox } from './MessageOutbox';
 import { ChatControls } from './ChatControls';
 import { ChatImage, MessageImageContext } from './ChatImage';
 import { findRecentImages, handleRecentImages, resolveRecentImage } from './recent-images';
@@ -278,6 +279,8 @@ export function Chat({
   const [files, setFiles] = useState<UploadedFile[]>([]);
   const [selectedSettings, setSelectedSettings] = useState<TurnOverrides | null>(null);
   const [draftReady, setDraftReady] = useState(false);
+  const [submissionStatus, setSubmissionStatus] = useState('');
+  const [delivery, setDelivery] = useState<'queue' | 'steer'>('queue');
   const [sending, setSending] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -419,7 +422,8 @@ export function Chat({
       setFirstVisibleKey(latestWindowStart(result.items));
       setHistory(result);
       void saveCache(cacheKey, result).catch(() => {});
-      if (attempt.current && result.items.some((item) => item.clientId === attempt.current?.key)) {
+      if (attempt.current && (result.items.some((item) => item.clientId === attempt.current?.key) ||
+        result.outbox?.some((item) => item.id === attempt.current?.key))) {
         const [sentText, sentFiles, , sentSettings] = JSON.parse(attempt.current.signature) as [
           string,
           string[],
@@ -618,6 +622,8 @@ export function Chat({
     finally { attachmentBusy.current = false; if (alive.current) setUploading(false); }
   }
   async function send() {
+    let submitMode: 'queue' | 'steer' | 'start' = history.activeTurnId ? delivery : 'start';
+    let expectedTurnId = submitMode === 'steer' ? history.activeTurnId : undefined;
     if (
       !client ||
       !online ||
@@ -625,13 +631,21 @@ export function Chat({
       loading ||
       sending ||
       uploading ||
-      history.activeTurnId ||
       (!text.trim() && !files.length)
     )
       return;
     const message = text.trim();
-    const settings = turnSettingsParams(history, selectedSettings);
-    const signature = JSON.stringify([message, files.map((f) => f.id), settings, selectedSettings]);
+    let settings = submitMode === 'steer' ? {} : turnSettingsParams(history, selectedSettings);
+    if (attempt.current) {
+      const saved = JSON.parse(attempt.current.signature);
+      if (saved[0] === message && JSON.stringify(saved[1]) === JSON.stringify(files.map((file) => file.id)) &&
+          JSON.stringify(saved[3]) === JSON.stringify(selectedSettings)) {
+        // Retrying an uncertain submission must keep its original delivery and
+        // target turn even when the task completed during a disconnect.
+        submitMode = saved[4]; expectedTurnId = saved[5]; settings = saved[2];
+      }
+    }
+    const signature = JSON.stringify([message, files.map((f) => f.id), settings, selectedSettings, submitMode, expectedTurnId]);
     if (!attempt.current || attempt.current.signature !== signature)
       attempt.current = {
         signature,
@@ -651,20 +665,23 @@ export function Chat({
       return;
     }
     setError('');
+    setSubmissionStatus('');
     pinned.current = true;
     try {
       await client.request(
-        'sessions/send',
+        submitMode === 'queue' ? 'sessions/enqueue' : submitMode === 'steer' ? 'sessions/steer' : 'sessions/send',
         {
           threadId: session.id,
           text: message,
           attachmentIds: files.map((f) => f.id),
           idempotencyKey: attempt.current.key,
           ...settings,
+          ...(expectedTurnId ? { expectedTurnId } : {}),
         },
         deviceId,
       );
       if (alive.current) {
+        if (submitMode === 'steer') setSubmissionStatus('补充已接受，当前任务继续执行');
         setText((previous) => (previous.trim() === message ? '' : previous));
         setFiles([]);
         latestDraft.current = {
@@ -676,17 +693,29 @@ export function Chat({
         void persistDraft().catch(() => {});
         // The ACK does not guarantee that settings notifications have arrived.
         // Read native configuration before replacing the pending selection.
-        if (await load()) {
+        if (submitMode === 'queue') {
+          setSelectedSettings(null); attempt.current = null;
+          latestDraft.current.settings = null; latestDraft.current.attempt = null;
+          void persistDraft().catch(() => {});
+          void load();
+        } else if (await load()) {
           if (!alive.current) return;
-          setSelectedSettings(null);
+          if (submitMode !== 'steer') setSelectedSettings(null);
           attempt.current = null;
-          latestDraft.current.settings = null;
+          if (submitMode !== 'steer') latestDraft.current.settings = null;
           latestDraft.current.attempt = null;
           void persistDraft().catch(() => {});
         }
       }
     } catch (e) {
-      if (alive.current) setError((e as Error).message);
+      if (alive.current) {
+        setError((e as Error).message);
+        const code = (e as { code?: string }).code;
+        if (code && ['CODEX_-32600', 'CODEX_-32601', 'CODEX_UNSUPPORTED_API', 'TURN_ACTIVE', 'STEER_OVERRIDES', 'MODEL_NOT_FOUND', 'INVALID_EFFORT', 'ATTACHMENT_NOT_FOUND', 'EMPTY_MESSAGE'].includes(code)) {
+          attempt.current = null; latestDraft.current.attempt = null;
+          void persistDraft().catch(() => {});
+        }
+      }
     } finally {
       if (alive.current) setSending(false);
     }
@@ -797,12 +826,17 @@ export function Chat({
               }}
             />
           ))}
+          <MessageOutbox messages={history.outbox ?? []} online={online && !sending} onRetry={(id) => {
+            void client?.request('sessions/queue/retry', { threadId: session.id, id }, deviceId)
+              .catch((error: Error) => setError(error.message));
+          }} />
           {running && (
             <View style={styles.progress}>
               <View style={styles.progressDot} />
               <Text style={styles.progressText}>
                 {history.requests.length ? '等待你的回复' : 'Codex 正在工作…'}
               </Text>
+              <Button label="停止任务" subtle disabled={!online || stopping} onPress={() => void stop()} />
             </View>
           )}
           {!!error && (
@@ -851,6 +885,12 @@ export function Chat({
             const next = latestDraft.current.files.filter((file) => file.id !== id);
             latestDraft.current.files = next; setFiles(next);
           }} />
+          {!!submissionStatus && <Text style={styles.connectionHint}>{submissionStatus}</Text>}
+          {running && <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
+            <Button label="排队发送" subtle={delivery !== 'queue'} disabled={sending} onPress={() => setDelivery('queue')} />
+            <Button label="立即补充" subtle={delivery !== 'steer'} disabled={sending} onPress={() => setDelivery('steer')} />
+          </View>}
+          {running && <Text style={styles.connectionHint}>{delivery === 'queue' ? '发送后排队，当前任务完成后依次执行' : '发送后立即补充当前任务，沿用当前任务配置'}</Text>}
           <View style={styles.composer}>
             <Pressable
               accessibilityRole="button"
@@ -890,32 +930,23 @@ export function Chat({
             />
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={running ? '停止任务' : '发送消息'}
-              disabled={
-                running
-                  ? !online || stopping
-                  : !online ||
-                    !draftReady ||
-                    loading ||
-                    sending ||
-                    uploading ||
-                    (!text.trim() && !files.length)
-              }
-              onPress={running ? stop : send}
+              accessibilityLabel={running ? (delivery === 'queue' ? '提交排队消息' : '立即发送补充') : '发送消息'}
+              disabled={!online || !draftReady || loading || sending || uploading || (!text.trim() && !files.length)}
+              onPress={() => void send()}
               style={({ pressed }) => [
                 styles.sendButton,
                 (!online ||
                   loading ||
-                  (!running && !text.trim() && !files.length) ||
+                  (!text.trim() && !files.length) ||
                   sending ||
                   uploading) && { opacity: 0.22 },
                 pressed && { opacity: 0.7 },
               ]}
             >
-              {sending || stopping ? (
+              {sending ? (
                 <ActivityIndicator color={palette.onInk} size="small" />
               ) : (
-                <Icon name={running ? 'stop' : 'send'} size={21} color={palette.onInk} />
+                <Icon name="send" size={21} color={palette.onInk} />
               )}
             </Pressable>
           </View>

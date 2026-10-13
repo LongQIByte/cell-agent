@@ -89,6 +89,13 @@ export interface CodexRequest {
   params: JsonRecord;
   createdAt: number;
 }
+export interface OutboxMessage {
+  id: string;
+  text: string;
+  attachmentNames: string[];
+  status: 'queued' | 'submitting' | 'accepted' | 'failed' | 'uncertain';
+  error?: string;
+}
 export interface SessionHistory {
   session: Session;
   model: string | null;
@@ -104,6 +111,7 @@ export interface SessionHistory {
   goal?: SessionGoal | null;
   capabilities?: SessionCapabilities;
   metrics?: RunMetrics | null;
+  outbox?: OutboxMessage[];
 }
 export interface SessionGoal {
   threadId: string;

@@ -1,6 +1,8 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
+import type { JsonRecord, OutboxMessage } from '@codex-remote/protocol';
+export interface OutboxRow { id: string; thread_id: string; payload: string; status: OutboxMessage['status']; error: string | null }
 export interface AttachmentRow {
   id: string;
   thread_id: string;
@@ -18,7 +20,29 @@ export class AgentStore {
     this.db.exec(`PRAGMA journal_mode=WAL;
       CREATE TABLE IF NOT EXISTS uploaded_files (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, name TEXT NOT NULL, mime_type TEXT NOT NULL, size INTEGER NOT NULL, path TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS turn_requests (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, result TEXT, created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS message_outbox (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL, error TEXT);
       CREATE TABLE IF NOT EXISTS runtime_metrics (thread_id TEXT PRIMARY KEY, snapshot TEXT NOT NULL);`);
+  }
+  outboxMessage(id: string): OutboxRow | undefined {
+    return this.db.prepare('SELECT * FROM message_outbox WHERE id=?').get(id) as unknown as OutboxRow | undefined;
+  }
+  pendingOutboxThreads(): string[] {
+    return this.db.prepare("SELECT DISTINCT thread_id FROM message_outbox WHERE status IN ('queued', 'submitting')")
+      .all().map((row) => String(row.thread_id));
+  }
+  outbox(threadId: string): OutboxRow[] {
+    return this.db.prepare('SELECT * FROM message_outbox WHERE thread_id=? ORDER BY rowid').all(threadId) as unknown as OutboxRow[];
+  }
+  enqueue(id: string, threadId: string, payload: JsonRecord) {
+    this.db.prepare("INSERT INTO message_outbox VALUES (?, ?, ?, 'queued', NULL)").run(id, threadId, JSON.stringify(payload));
+  }
+  updateOutbox(id: string, status: OutboxRow['status'], error: string | null = null) {
+    this.db.prepare('UPDATE message_outbox SET status=?, error=? WHERE id=?').run(status, error, id);
+  }
+  retryRejected(id: string) {
+    const previous = this.request(id);
+    if (previous?.result && JSON.parse(previous.result).error)
+      this.db.prepare('DELETE FROM turn_requests WHERE id=?').run(id);
   }
   metrics<T>(threadId: string): T | null {
     const row = this.db.prepare('SELECT snapshot FROM runtime_metrics WHERE thread_id=?').get(threadId) as { snapshot: string } | undefined;
