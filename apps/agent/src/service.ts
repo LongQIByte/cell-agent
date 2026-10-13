@@ -513,7 +513,7 @@ export class AgentService extends EventEmitter {
       throw new RemoteError('SESSION_ON_OTHER_DEVICE', '此会话已属于其他电脑，请从对应设备打开');
     return session;
   }
-  async readSession(threadId: string, cursor?: string | null): Promise<SessionHistory> {
+  async readSession(threadId: string, cursor?: string | null, limit = 6): Promise<SessionHistory> {
     const { thread } = await this.codex.call('thread/read', { threadId });
     const session = await this.localSession(thread);
     let settings: SessionSettings | undefined;
@@ -533,7 +533,7 @@ export class AgentService extends EventEmitter {
     const page: any = await this.codex.call('thread/turns/list', {
       threadId,
       cursor: cursor ?? null,
-      limit: 30,
+      limit,
       sortDirection: 'desc',
       itemsView: 'full',
     });
@@ -768,9 +768,9 @@ export class AgentService extends EventEmitter {
     }
     if (method === 'sessions/read') {
       const p = z
-        .object({ threadId: idSchema, cursor: z.string().max(1000).nullable().optional() })
+        .object({ threadId: idSchema, cursor: z.string().max(1000).nullable().optional(), limit: z.number().int().min(1).max(30).optional() })
         .parse(raw);
-      return this.readSession(p.threadId, p.cursor);
+      return this.readSession(p.threadId, p.cursor, p.limit);
     }
     if (method === 'sessions/create') {
       const p = z

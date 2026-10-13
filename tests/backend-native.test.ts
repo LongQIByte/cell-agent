@@ -59,6 +59,38 @@ const thread = (id: string, cwd: string, projectId: string | null, updatedAt = 1
   id, cwd, projectId, name: id, updatedAt, createdAt: 1, model: 'model-a', reasoningEffort: 'low',
 });
 
+test('session history fetches small descending pages and preserves the native cursor and chronological item order', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'cell-agent-history-')));
+  const native = new NativeCodex();
+  native.threads = [thread('one', root, null)];
+  const call = native.call.bind(native);
+  const requests: any[] = [];
+  native.call = async (method, params) => {
+    if (method !== 'thread/turns/list') return call(method, params);
+    requests.push(params);
+    const end = params.cursor ? Number(params.cursor) : 20;
+    const start = Math.max(0, end - params.limit);
+    return { data: Array.from({ length: end - start }, (_, i) => ({
+      id: `turn-${end - i - 1}`, status: 'completed', startedAt: end - i,
+      items: [{ id: `message-${end - i - 1}`, type: 'agentMessage', text: String(end - i - 1) }],
+    })), nextCursor: start ? String(start) : null };
+  };
+  const service = new AgentService(native as unknown as CodexRpc, new AgentStore(':memory:'), 'machine', root);
+  try {
+    const newest = await service.readSession('one');
+    assert.deepEqual(newest.items.map((item) => item.text), ['14', '15', '16', '17', '18', '19']);
+    assert.equal(newest.nextCursor, '14');
+    const older = await service.handle('sessions/read', { threadId: 'one', cursor: newest.nextCursor, limit: 4 }) as any;
+    assert.deepEqual(older.items.map((item: any) => item.text), ['10', '11', '12', '13']);
+    assert.equal(older.nextCursor, '10');
+    assert.deepEqual(requests.map(({ limit, cursor, sortDirection }) => ({ limit, cursor, sortDirection })), [
+      { limit: 6, cursor: null, sortDirection: 'desc' }, { limit: 4, cursor: '14', sortDirection: 'desc' },
+    ]);
+    await assert.rejects(service.handle('sessions/read', { threadId: 'one', limit: 0 }));
+    await assert.rejects(service.handle('sessions/read', { threadId: 'one', limit: 31 }));
+  } finally { service.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test('chat images survive history reload and tool completion, with reads limited to referenced images in that thread', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cell-agent-images-')));
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==', 'base64');

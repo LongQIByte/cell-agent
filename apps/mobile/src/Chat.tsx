@@ -28,6 +28,7 @@ import type { ClientState, RemoteClient } from './client';
 import { readCache, saveCache } from './storage';
 import { createSessionDraftStore, type SessionDraft } from './session-draft';
 import { applySessionEvent, mergeChatItems } from './session-state';
+import { CHAT_WINDOW_SIZE, HISTORY_TURN_LIMIT, chatItemKey, chatWindowStart, latestWindowStart } from './chat-window';
 import { Icon } from './icons';
 import { Button, useUI, useThemedStyles, type Palette } from './ui';
 import { MarkdownMessage } from './MarkdownMessage';
@@ -90,7 +91,7 @@ function ExecutionItem({ item }: { item: ChatItem }) {
     </View>
   );
 }
-function Message({ item }: { item: ChatItem }) {
+const Message = React.memo(function Message({ item }: { item: ChatItem }) {
   const { common } = useUI();
   const styles = useThemedStyles(createStyles);
   if (item.kind === 'command' || item.kind === 'file' || item.kind === 'activity')
@@ -123,7 +124,7 @@ function Message({ item }: { item: ChatItem }) {
       {item.images?.map((image, index) => <ChatImage key={`${image.source}:${index}`} source={image.source} name={image.name} />)}
     </View>
   );
-}
+});
 function RequestPrompt({
   request,
   onRespond,
@@ -270,6 +271,8 @@ export function Chat({
   });
   const [loading, setLoading] = useState(true);
   const [olderLoading, setOlderLoading] = useState(false);
+  const [firstVisibleKey, setFirstVisibleKey] = useState<string | null>(null);
+  const olderLoadingRef = useRef(false);
   const [error, setError] = useState('');
   const [text, setText] = useState('');
   const [files, setFiles] = useState<UploadedFile[]>([]);
@@ -310,6 +313,7 @@ export function Chat({
   const buffered = useRef<any[]>([]);
   const alive = useRef(true);
   const pinned = useRef(true);
+  const enteringAtBottom = useRef(true);
   const geometry = useRef({ y: 0, height: 0 });
   const prepending = useRef<{ y: number; height: number } | null>(null);
   const cacheKey = `session:${server}:${deviceId}:${session.id}`;
@@ -356,15 +360,16 @@ export function Chat({
   }, [persistDraft]);
   useEffect(() => {
     let cancelled = false;
-    void Promise.all([readCache<SessionHistory>(cacheKey), drafts.read(draftKey)])
-      .then(([cached, draft]) => {
+    // History cache hydration must not hold up the fresh snapshot or draft.
+    void readCache<SessionHistory>(cacheKey).then((cached) => {
+      if (cancelled || !cached) return;
+      setHistory((previous) => previous.sequence < 0
+        ? { ...cached, sequence: -1, requests: [], activeTurnId: null }
+        : previous);
+    }).catch(() => {});
+    void drafts.read(draftKey)
+      .then((draft) => {
         if (cancelled) return;
-        if (cached)
-          setHistory((previous) =>
-            previous.sequence < 0
-              ? { ...cached, sequence: -1, requests: [], activeTurnId: null }
-              : previous,
-          );
         if (draft) {
           setText(draft.text);
           setFiles(draft.files);
@@ -398,7 +403,7 @@ export function Chat({
     return () => clearTimeout(draftTimer.current);
   }, [persistDraft, draftReady, text, files, selectedSettings, sending]);
   const load = useCallback(async () => {
-    if (!client || !online || !draftReady || loadingRef.current) return false;
+    if (!client || !online || !draftReady || loadingRef.current || olderLoadingRef.current) return false;
     loadingRef.current = true;
     setLoading(true);
     buffered.current = [];
@@ -406,11 +411,12 @@ export function Chat({
     try {
       let result = await client.request<SessionHistory>(
         'sessions/read',
-        { threadId: session.id },
+        { threadId: session.id, limit: HISTORY_TURN_LIMIT },
         deviceId,
       );
       if (!alive.current) return false;
       for (const event of buffered.current) result = applySessionEvent(result, event);
+      setFirstVisibleKey(latestWindowStart(result.items));
       setHistory(result);
       void saveCache(cacheKey, result).catch(() => {});
       if (attempt.current && result.items.some((item) => item.clientId === attempt.current?.key)) {
@@ -467,27 +473,56 @@ export function Chat({
     const timer = setTimeout(() => void saveCache(cacheKey, history).catch(() => {}), 500);
     return () => clearTimeout(timer);
   }, [history, cacheKey]);
+  useEffect(() => {
+    if (!enteringAtBottom.current) return;
+    // A cached snapshot and the fresh snapshot can have identical heights.
+    // Position again after loading finishes, even without a size change.
+    const frame = requestAnimationFrame(() => {
+      if (enteringAtBottom.current) scroll.current?.scrollToEnd({ animated: false });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [loading, history.items.length]);
+  const visibleStart = chatWindowStart(history.items, firstVisibleKey);
+  const hasOlder = visibleStart > 0 || !!history.nextCursor;
   async function loadOlder() {
-    if (!client || !history.nextCursor || olderLoading) return;
+    if (loadingRef.current || olderLoadingRef.current || prepending.current) return;
+    if (visibleStart > 0) {
+      pinned.current = false;
+      prepending.current = { ...geometry.current };
+      setFirstVisibleKey(chatItemKey(history.items[Math.max(0, visibleStart - CHAT_WINDOW_SIZE)]));
+      return;
+    }
+    if (!client || !online || !history.nextCursor) return;
+    olderLoadingRef.current = true;
     setOlderLoading(true);
     setError('');
     pinned.current = false;
     try {
       const page = await client.request<SessionHistory>(
         'sessions/read',
-        { threadId: session.id, cursor: history.nextCursor },
+        { threadId: session.id, cursor: history.nextCursor, limit: HISTORY_TURN_LIMIT },
         deviceId,
       );
+      if (!alive.current) return;
       prepending.current = { ...geometry.current };
+      // Keep the currently visible anchor and reveal only the nearest batch,
+      // even when one older turn contains a large number of tool records.
+      const merged = mergeChatItems(page.items, history.items);
+      const anchor = history.items[0];
+      const anchorIndex = anchor ? merged.findIndex((item) => chatItemKey(item) === chatItemKey(anchor)) : merged.length;
+      const first = merged[Math.max(0, anchorIndex - CHAT_WINDOW_SIZE)];
+      setFirstVisibleKey(first ? chatItemKey(first) : null);
+      if (!page.items.length) prepending.current = null;
       setHistory((previous) => ({
         ...previous,
         items: mergeChatItems(page.items, previous.items),
         nextCursor: page.nextCursor,
       }));
     } catch (e) {
-      setError((e as Error).message);
+      if (alive.current) setError((e as Error).message);
     } finally {
-      setOlderLoading(false);
+      olderLoadingRef.current = false;
+      if (alive.current) setOlderLoading(false);
     }
   }
   async function pick() {
@@ -679,14 +714,28 @@ export function Chat({
     >
       <ScrollView
         ref={scroll}
+        testID="chat-history"
         style={{ flex: 1 }}
         contentContainerStyle={styles.messages}
         keyboardShouldPersistTaps="handled"
-        scrollEventThrottle={100}
+        scrollEventThrottle={16}
+        onLayout={() => {
+          if (enteringAtBottom.current || pinned.current) scroll.current?.scrollToEnd({ animated: false });
+        }}
+        onScrollBeginDrag={() => {
+          enteringAtBottom.current = false;
+          pinned.current = false;
+        }}
         onScroll={(event) => {
           const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+          const movingUp = contentOffset.y < geometry.current.y;
           geometry.current = { y: contentOffset.y, height: contentSize.height };
-          pinned.current = contentSize.height - contentOffset.y - layoutMeasurement.height < 100;
+          const atBottom = contentSize.height - contentOffset.y - layoutMeasurement.height < 100;
+          // Initial layout notifications can report offset zero before the
+          // first scrollToEnd completes. Keep the initial bottom intent alive.
+          if (atBottom && !loading && history.items.length) enteringAtBottom.current = false;
+          pinned.current = enteringAtBottom.current || atBottom;
+          if (!enteringAtBottom.current && movingUp && contentOffset.y < 160 && hasOlder && !loading) void loadOlder();
         }}
         onContentSizeChange={(_, height) => {
           if (prepending.current) {
@@ -700,16 +749,16 @@ export function Chat({
         }}
       >
         <View style={styles.chatWidth}>
-          {history.nextCursor && (
+          {hasOlder && (
             <Button
               subtle
               label={olderLoading ? '加载中…' : '查看更早消息'}
               onPress={loadOlder}
-              disabled={!online || olderLoading}
+              disabled={loading || olderLoading || (!online && visibleStart === 0)}
               style={{ alignSelf: 'center', marginBottom: 18 }}
             />
           )}
-          {loading && <ActivityIndicator color={palette.ink} style={{ marginTop: 45 }} />}
+          {loading && !history.items.length && <ActivityIndicator color={palette.ink} style={{ marginTop: 45 }} />}
           {!loading && !history.items.length && (
             <View style={styles.empty}>
               <Text style={styles.emptyTitle}>有什么可以帮你？</Text>
@@ -730,8 +779,8 @@ export function Chat({
             }} />
           </View>}
           <MessageImageContext.Provider value={{ client, deviceId, threadId: session.id, online }}>
-          {history.items.map((item) => (
-            <Message key={`${item.turnId}:${item.id}`} item={item} />
+          {history.items.slice(visibleStart).map((item) => (
+            <Message key={chatItemKey(item)} item={item} />
           ))}
           </MessageImageContext.Provider>
           {history.requests.map((request) => (

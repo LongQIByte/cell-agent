@@ -204,6 +204,7 @@ async function connectFixture(page: Page, large = false) {
   const modes = new Map<string, string>();
   const goals = new Map<string, any>();
   const imageItems: ChatItem[] = [];
+  let historyPages: { items: ChatItem[]; nextCursor: string | null }[] | undefined;
   await page.routeWebSocket('**/ws', (socket) => {
     sockets.push(socket);
     socket.onMessage((raw) => {
@@ -234,7 +235,8 @@ async function connectFixture(page: Page, large = false) {
           const selected = [...projects.flatMap((p) => p.sessions), ...recentSessions.map((entry) => entry.session)].find((item) => item.id === message.params.threadId)!;
           const settings = settingsByThread.get(message.params.threadId) ?? { model: 'model-a', reasoningEffort: 'medium', permissions: fullPermissions };
           result = { session: selected, ...settings, mode: modes.get(selected.id) ?? 'default', goal: goals.get(selected.id) ?? null,
-            capabilities: { plan: true, goal: true, goalBudget: true }, items: [{ id: 'markdown', turnId: 'fixture-turn', kind: 'assistant', text: markdown, timestamp: 1000 }, ...imageItems], nextCursor: null, activeTurnId: null, requests: [], sequence };
+            capabilities: { plan: true, goal: true, goalBudget: true }, items: [{ id: 'markdown', turnId: 'fixture-turn', kind: 'assistant', text: markdown, timestamp: 1000 }, ...imageItems], nextCursor: null, activeTurnId: null, requests: [], sequence,
+            ...(historyPages?.[Number(message.params.cursor ?? 0)]) };
           break;
         }
         case 'sessions/send':
@@ -292,6 +294,7 @@ async function connectFixture(page: Page, large = false) {
   await page.goto('/');
   await expect(page.getByRole('button', { name: '项目 Native Group，Mac 00', exact: true })).toBeVisible();
   return { calls, projects, recentSessions, sockets,
+    historyPages: (pages: NonNullable<typeof historyPages>) => { historyPages = pages; },
     imageItem: (item: ChatItem) => {
       imageItems.push(item);
       sockets.at(-1)!.send(JSON.stringify({ type: 'event', method: 'session/item', deviceId: devices[0].id,
@@ -304,6 +307,70 @@ async function connectFixture(page: Page, large = false) {
     deliverDirectory: () => { deferDirectories = false; pendingDirectory?.(); },
     changed: () => sockets.at(-1)!.send(JSON.stringify({ type: 'event', method: 'catalog/changed', params: {} })) };
 }
+
+test('long sessions open at the latest messages and reveal history on upward scrolling without moving the reading anchor', async ({ page }) => {
+  const fixture = await connectFixture(page);
+  const items = (start: number, end: number): ChatItem[] => Array.from({ length: end - start }, (_, i) => ({
+    id: `history-${start + i}`, turnId: `turn-${Math.floor((start + i) / 20)}`, kind: 'assistant',
+    text: `History message ${start + i}\n\n${'A paragraph for the scrolling check. '.repeat(5)}`, timestamp: start + i,
+  }));
+  fixture.historyPages([
+    { items: items(120, 240), nextCursor: '1' },
+    { items: items(0, 120), nextCursor: null },
+  ]);
+  await page.getByRole('button', { name: '打开会话 Native session 1', exact: true }).click();
+  const list = page.getByTestId('chat-history');
+  const messages = page.getByTestId('assistant-message');
+  const reads = () => fixture.calls.filter((call) => call.method === 'sessions/read');
+  await expect(messages).toHaveCount(40);
+  await expect.poll(() => list.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(5);
+  expect(reads()).toHaveLength(1);
+  expect(reads()[0].params.limit).toBe(6);
+  await expect(messages.first()).toContainText('History message 200');
+  // The composer/keyboard can change the viewport after content measurement.
+  // Entry should still show the latest message without another size event.
+  await page.setViewportSize({ width: 390, height: 700 });
+  await expect.poll(() => list.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(5);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect.poll(() => list.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(5);
+
+  async function scrollUp(expectedCount: number, anchorNumber: number) {
+    const anchor = messages.filter({ hasText: `History message ${anchorNumber}\n` });
+    // Stop just outside the preload threshold, then enter it. Measure an
+    // actual message's screen position across insertion, not just scrollTop.
+    await list.evaluate((element) => { element.scrollTop = 180; });
+    await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(180);
+    // Let React Native Web deliver its throttled scroll notification.
+    await page.waitForTimeout(180);
+    const before = (await anchor.boundingBox())!.y + 60;
+    await list.evaluate((element) => { element.scrollTop = 120; });
+    await expect(messages).toHaveCount(expectedCount);
+    await expect.poll(async () => Math.abs((await anchor.boundingBox())!.y - before)).toBeLessThan(3);
+  }
+  await scrollUp(80, 200);
+  expect(reads()).toHaveLength(1);
+  await scrollUp(120, 160);
+  expect(reads()).toHaveLength(1);
+  await scrollUp(160, 120);
+  expect(reads()).toHaveLength(2);
+  expect(reads()[1].params.cursor).toBe('1');
+  await scrollUp(200, 80);
+  await scrollUp(240, 40);
+  await expect(page.getByRole('button', { name: '查看更早消息', exact: true })).toHaveCount(0);
+  expect(reads()).toHaveLength(2);
+
+  const position = await list.evaluate((element) => element.scrollTop);
+  fixture.imageItem({ id: 'new-live', turnId: 'new-turn', kind: 'assistant', text: 'New streamed message', timestamp: 241 });
+  await expect(messages).toHaveCount(241);
+  await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(position);
+  await page.reload();
+  await expect(messages).toHaveCount(40);
+  await expect.poll(() => list.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(5);
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: '打开会话 Native session 1', exact: true }).click();
+  await expect(messages).toHaveCount(40);
+  await expect.poll(() => list.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(5);
+});
 
 test('quiet updates preserve collapse; sessions are limited and the large list survives returning from chat', async ({ page }) => {
   const fixture = await connectFixture(page, true);
