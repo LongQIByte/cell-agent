@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   AppState,
   Modal,
+  Keyboard,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -280,6 +281,12 @@ export function Chat({
   const [draftReady, setDraftReady] = useState(false);
   const [sending, setSending] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [keyboardVisible, setKeyboardVisible] = useState(Keyboard.isVisible());
+  useEffect(() => {
+    const shown = Keyboard.addListener('keyboardDidShow', () => setKeyboardVisible(true));
+    const hidden = Keyboard.addListener('keyboardDidHide', () => setKeyboardVisible(false));
+    return () => { shown.remove(); hidden.remove(); };
+  }, []);
   const [stopping, setStopping] = useState(false);
   const [recent, setRecent] = useState<RecentImage[]>([]);
   const attachmentBusy = useRef(false);
@@ -707,9 +714,10 @@ export function Chat({
   return (
     <KeyboardAvoidingView
       style={styles.chat}
-      behavior={
-        Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined
-      }
+      // Android's resize window owns IME insets; a second height adjustment
+      // uses parent-relative coordinates and can clip or double-shift the composer.
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      enabled={Platform.OS === 'ios'}
       testID="chat-screen"
     >
       <ScrollView
@@ -817,7 +825,7 @@ export function Chat({
           )}
         </View>
       </ScrollView>
-      <View style={[styles.composerOuter, { paddingBottom: Math.max(12, insets.bottom) }]}>
+      <View style={[styles.composerOuter, { paddingBottom: keyboardVisible ? 12 : Math.max(12, insets.bottom) }]}>
         <View style={styles.chatWidth}>
           <TurnSettingsPicker
             client={client}

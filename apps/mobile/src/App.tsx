@@ -425,12 +425,12 @@ function Main() {
   const selectedRoute = selected ? client.route(selected.deviceId) : null;
   if (!booted)
     return (
-      <View style={[styles.root, { height, justifyContent: 'center' }]}>
+      <View style={[styles.root, Platform.OS === 'web' && { height }, { justifyContent: 'center' }]}>
         <ActivityIndicator color={palette.ink} />
       </View>
     );
   return (
-    <View style={[styles.root, { height }]}>
+    <View style={[styles.root, Platform.OS === 'web' && { height }]}>
       <StatusBar style={scheme === 'dark' ? 'light' : 'dark'} backgroundColor={palette.background} />
       <SafeAreaView
         edges={selected ? ['top', 'left', 'right'] : ['top', 'bottom', 'left', 'right']}
