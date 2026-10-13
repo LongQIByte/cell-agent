@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import type { RemoteClient, ClientState, Connection } from './client';
+import type { ClientState, Connection } from './client';
+import type { ConnectionHub } from './connection-hub';
 import { Button, useUI, useThemedStyles, type Palette } from './ui';
 import { GeneralSettings } from './GeneralSettings';
 import { ConnectionForm } from './ConnectionForm';
@@ -9,21 +10,26 @@ import { computerStatus } from './connection-state';
 import { Icon } from './icons';
 export function Settings({
   connection,
+  connections,
   state,
   client,
   onSave,
+  onSelect,
   onDisconnect,
 }: {
   connection: Connection | null;
+  connections: Connection[];
   state: ClientState;
-  client: RemoteClient | null;
+  client: ConnectionHub;
   onSave: (connection: Connection) => Promise<void>;
-  onDisconnect: () => void;
+  onSelect: (connection: Connection) => void;
+  onDisconnect: (server: string) => Promise<void>;
 }) {
   const { palette, common } = useUI();
   const styles = useThemedStyles(createStyles);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
   const selectedDevice = state.devices.find((device) => device.id === selectedDeviceId);
+  const selectedRoute = selectedDevice ? client.route(selectedDevice.id) : null;
   return (
     <View style={common.page} testID="settings-screen">
       <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 40 }}>
@@ -36,9 +42,22 @@ export function Settings({
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>连接</Text>
             <Text style={styles.help}>
-              手机与电脑连接同一局域网。在电脑启动服务后，填写服务地址与配对密钥。
+              填写电脑的服务地址与配对密钥。可以添加多个服务，同时连接多台电脑。
             </Text>
             <ConnectionForm connection={connection} onSave={onSave} />
+            {connections.map((profile) => {
+              const service = client.service(profile.server);
+              return <View key={profile.server} style={styles.device}>
+                <Pressable accessibilityRole="button" accessibilityLabel={`编辑服务 ${profile.server}`}
+                  onPress={() => onSelect(profile)} style={{ flex: 1 }}>
+                  <Text style={styles.platform}>{profile.server}</Text>
+                  <Text style={styles.deviceState}>{service?.state.status === 'connected' ? '已连接' : profile.disabled ? '已断开' : '等待连接'}</Text>
+                </Pressable>
+                <Button subtle label={profile.disabled ? '重新连接' : '断开此连接'}
+                  accessibilityLabel={`${profile.disabled ? '重新连接' : '断开'}服务 ${profile.server}`}
+                  onPress={() => profile.disabled ? onSave({ server: profile.server, token: profile.token }) : onDisconnect(profile.server)} />
+              </View>;
+            })}
           </View>
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>我的电脑</Text>
@@ -78,14 +97,6 @@ export function Settings({
                 </View>
               </Pressable>
             ))}
-            {connection && (
-              <Button
-                label="断开连接"
-                onPress={onDisconnect}
-                subtle
-                style={{ alignSelf: 'flex-start', paddingHorizontal: 0, marginTop: 18 }}
-              />
-            )}
           </View>
           <Text style={styles.footer}>Codex Remote</Text>
         </View>
@@ -94,9 +105,9 @@ export function Settings({
         <DeviceConnectionDetail
           key={selectedDevice.id}
           device={selectedDevice}
-          connection={connection}
-          state={state}
-          client={client}
+          connection={selectedRoute?.connection ?? connection}
+          state={selectedRoute?.state ?? state}
+          client={selectedRoute?.client ?? null}
           onSave={onSave}
           onClose={() => setSelectedDeviceId(null)}
         />

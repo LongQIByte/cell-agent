@@ -8,6 +8,7 @@ import {
 export interface Connection {
   server: string;
   token: string;
+  disabled?: boolean;
 }
 export type ConnectionStatus =
   'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'error';

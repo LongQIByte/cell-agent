@@ -16,9 +16,10 @@ import {
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
-import type { Project, RecentSession, Session } from '@codex-remote/protocol';
-import { RemoteClient, websocketUrl, type Connection } from './client';
-import { loadConnection, saveConnection, clearConnection, readCache, saveCache } from './storage';
+import type { Device, Project, RecentSession, Session } from '@codex-remote/protocol';
+import { websocketUrl, type Connection } from './client';
+import { ConnectionHub } from './connection-hub';
+import { loadConnection, loadConnections, saveConnection, readCache, saveCache } from './storage';
 import { Projects } from './Projects';
 import { Settings } from './Settings';
 import { Chat } from './Chat';
@@ -55,8 +56,10 @@ function Main() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [booted, setBooted] = useState(false);
   const [connection, setConnection] = useState<Connection | null>(null);
+  const [connections, setConnections] = useState<Connection[]>([]);
+  const catalogServer = connections[0]?.server;
   const [tab, setTab] = useState<'projects' | 'settings'>('projects');
-  const [state, setState] = useDeviceState(connection?.server);
+  const [state, setState] = useDeviceState(catalogServer, 'all-known-computers');
   const [projects, setProjects] = useState<Project[]>([]);
   const [recentSessions, setRecentSessions] = useState<RecentSession[]>([]);
   const [refreshing, setRefreshing] = useState(false);
@@ -72,21 +75,27 @@ function Main() {
   useEffect(() => { Keyboard.dismiss(); }, [selected?.session.id, tab]);
   const [newProject, setNewProject] = useState(false);
   const [creatingId, setCreatingId] = useState<string | null>(null);
-  const client = useMemo(
-    () => (connection ? new RemoteClient(connection) : null),
-    [connection?.server, connection?.token],
-  );
+  const client = useMemo(() => new ConnectionHub(undefined, {
+    read: (server) => readCache<Device[]>(`known-computers:${server}`),
+    write: (server, devices) => saveCache(`known-computers:${server}`, devices),
+  }), []);
+  useEffect(() => { client.configure(connections); }, [client, connections]);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const refreshInProgress = useRef(false);
-  const refreshAgain = useRef(false);
+  const catalogRequests = useRef(new Map<string, { generation: number; promise: Promise<void> }>());
+  const catalogErrors = useRef(new Map<string, string>());
   const catalogLoaded = useRef(false);
   const currentClient = useRef(client);
   currentClient.current = client;
-  const cacheKey = `native-catalog:${connection?.server ?? 'none'}:${archived ? 'archived' : 'active'}`;
-  const collapseKey = `collapsed-projects:${connection?.server ?? 'none'}`;
+  const cacheKey = `native-catalog:${catalogServer ?? 'none'}:${archived ? 'archived' : 'active'}`;
+  const collapseKey = `collapsed-projects:${catalogServer ?? 'none'}`;
   const currentCatalog = useRef(cacheKey);
   currentCatalog.current = cacheKey;
   const catalogGeneration = useRef(0);
+  async function updateConnection(value: Connection) {
+    const profiles = await saveConnection(value);
+    setConnections(profiles);
+    setConnection(value);
+  }
   async function applyPairingLink(url: string) {
     let parsed: URL;
     try {
@@ -99,8 +108,7 @@ function Main() {
     const token = params.get('key') ?? parsed.searchParams.get('key');
     if (!server || !token || token.length < 16) return false;
     const value = { server: websocketUrl(server), token };
-    await saveConnection(value);
-    setConnection(value);
+    await updateConnection(value);
     if (Platform.OS === 'web') window.history.replaceState(null, '', window.location.pathname);
     return true;
   }
@@ -110,8 +118,11 @@ function Main() {
       try {
         const url = Platform.OS === 'web' ? window.location.href : await Linking.getInitialURL();
         if (!url || !(await applyPairingLink(url))) {
-          const saved = await loadConnection();
-          if (alive) setConnection(saved);
+          const [saved, profiles] = await Promise.all([loadConnection(), loadConnections()]);
+          if (alive) {
+            setConnections(profiles);
+            setConnection(profiles.find((profile) => profile.server === saved?.server) ?? saved);
+          }
         }
         if (Platform.OS === 'web' && alive) {
           const value = window.history.state?.selected;
@@ -135,48 +146,38 @@ function Main() {
     const target = client;
     if (!target || target.state.status !== 'connected') return;
     const generation = catalogGeneration.current;
-    if (refreshInProgress.current) {
-      refreshAgain.current = true;
-      if (manual) setRefreshing(true);
-      return;
-    }
-    refreshInProgress.current = true;
-    setRefreshing(manual);
+    if (manual) setRefreshing(true);
     setLoading(!catalogLoaded.current);
     const online = target.state.devices.filter((d) => d.online);
-    try {
-      const results = await Promise.allSettled(
-        online.map((device) =>
-          target.request<{ projects: Project[]; recentSessions: RecentSession[] }>('projects/list', { archived }, device.id),
-        ),
-      );
-      if (currentClient.current !== target || currentCatalog.current !== cacheKey || catalogGeneration.current !== generation) return;
-      catalogLoaded.current = true;
-      const succeeded = new Set<string>();
-      const incoming: Project[] = [];
-      const incomingRecent: RecentSession[] = [];
-      const errors: string[] = [];
-      results.forEach((result, index) => {
-        if (result.status === 'fulfilled') {
-          succeeded.add(online[index].id);
-          incoming.push(...result.value.projects);
-          incomingRecent.push(...result.value.recentSessions);
-        } else errors.push(`${online[index].name}：${result.reason?.message ?? '读取失败'}`);
-      });
-      setProjects((previous) => mergeProjects(previous, incoming, succeeded));
-      setRecentSessions((previous) => mergeRecentSessions(previous, incomingRecent, succeeded));
-      setError(errors.join('\n'));
-    } finally {
-      if (currentClient.current === target && currentCatalog.current === cacheKey && catalogGeneration.current === generation) {
-        refreshInProgress.current = false;
-        setRefreshing(false);
-        setLoading(false);
-        if (refreshAgain.current) {
-          refreshAgain.current = false;
-          void currentRefresh.current();
-        }
-      }
-    }
+    const valid = () => currentClient.current === target && currentCatalog.current === cacheKey && catalogGeneration.current === generation;
+    await Promise.all(online.map((device) => {
+      const pending = catalogRequests.current.get(device.id);
+      if (pending?.generation === generation) return pending.promise;
+      const request = { generation, promise: Promise.resolve() };
+      request.promise = target.request<{ projects: Project[]; recentSessions: RecentSession[] }>('projects/list', { archived }, device.id)
+        .then((result) => {
+          if (!valid()) return;
+          catalogLoaded.current = true;
+          const succeeded = new Set([device.id]);
+          setProjects((previous) => mergeProjects(previous, result.projects, succeeded));
+          setRecentSessions((previous) => mergeRecentSessions(previous, result.recentSessions, succeeded));
+          catalogErrors.current.delete(device.id);
+          setError([...catalogErrors.current.values()].join('\n'));
+          setLoading(false);
+        }).catch((reason) => {
+          if (!valid()) return;
+          catalogErrors.current.set(device.id, `${device.name}：${reason?.message ?? '读取失败'}`);
+          setError([...catalogErrors.current.values()].join('\n'));
+        }).finally(() => {
+          if (catalogRequests.current.get(device.id) === request) catalogRequests.current.delete(device.id);
+          if (valid() && ![...catalogRequests.current.values()].some((value) => value.generation === generation)) {
+            setRefreshing(false);
+            setLoading(false);
+          }
+        });
+      catalogRequests.current.set(device.id, request);
+      return request.promise;
+    }));
   }, [client, cacheKey, archived]);
   const currentRefresh = useRef(refresh);
   currentRefresh.current = refresh;
@@ -190,8 +191,7 @@ function Main() {
     setArchivingId(null);
     setRefreshing(false);
     setLoading(false);
-    refreshInProgress.current = false;
-    refreshAgain.current = false;
+    catalogErrors.current.clear();
     catalogLoaded.current = false;
     void readCache<{ projects: Project[]; recentSessions: RecentSession[] }>(cacheKey)
       .then((cached) => {
@@ -231,13 +231,13 @@ function Main() {
   const toggleProject = useCallback((project: Project) => {
     setCollapsed((previous) => {
       const next = new Set(previous);
-      const key = `${connection?.server}:${project.deviceId}:${project.id}`;
+      const key = `${catalogServer}:${project.deviceId}:${project.id}`;
       if (next.has(key)) next.delete(key);
       else next.add(key);
       if (!collapseLoaded.current) pendingCollapse.current.set(key, next.has(key));
       return next;
     });
-  }, [connection?.server]);
+  }, [catalogServer]);
   useEffect(() => {
     if (collapseLoaded.current) void saveCache(collapseKey, [...collapsed]).catch(() => {});
   }, [collapsed, collapseKey]);
@@ -276,7 +276,7 @@ function Main() {
       clearTimeout(refreshTimer.current);
       client.disconnect();
     };
-  }, [client]);
+  }, [client, setState]);
   useEffect(() => {
     if ((selected && !(canSplit && sidebarOpen)) || tab !== 'projects') return;
     const timer = setInterval(() => {
@@ -422,6 +422,7 @@ function Main() {
       }
     }
   }
+  const selectedRoute = selected ? client.route(selected.deviceId) : null;
   if (!booted)
     return (
       <View style={[styles.root, { height, justifyContent: 'center' }]}>
@@ -448,7 +449,7 @@ function Main() {
               archivingId={archivingId}
               collapsed={collapsed}
               onToggle={toggleProject}
-              collapsePrefix={connection?.server ?? ''}
+              collapsePrefix={catalogServer ?? ''}
               compact={!!selected && canSplit && sidebarOpen}
               error={[error, archiveError].filter(Boolean).join('\n')}
               creatingId={creatingId}
@@ -486,33 +487,28 @@ function Main() {
                 </View>
               )}
               <Chat
-                key={`${connection?.server}:${selected.deviceId}:${selected.session.id}`}
+                key={`${selectedRoute?.connection.server}:${selectedRoute?.deviceId}:${selected.session.id}`}
                 project={selected.project}
-                deviceId={selected.deviceId}
+                deviceId={selectedRoute?.deviceId ?? selected.deviceId}
                 session={selected.session}
-                client={client}
-                clientState={state}
-                server={connection?.server ?? ''}
+                client={selectedRoute?.client ?? null}
+                clientState={selectedRoute?.state ?? state}
+                server={selectedRoute?.connection.server ?? ''}
                 onOpenSource={(session) => openSelection({ deviceId: selected.deviceId, session,
                   project: projects.find((project) => project.deviceId === selected.deviceId && project.id === session.projectId) ?? null })}
               />
             </View>
           ) : tab === 'settings' ? (
             <Settings
-              key={connection?.server ?? 'none'}
               connection={connection}
+              connections={connections}
               state={state}
               client={client}
-              onSave={async (value) => {
-                await saveConnection(value);
-                if (connection?.server === value.server && connection?.token === value.token)
-                  client?.connect();
-                else setConnection(value);
-              }}
-              onDisconnect={() => {
-                client?.disconnect();
-                void clearConnection().catch(() => {});
-                setConnection(null);
+              onSave={updateConnection}
+              onSelect={setConnection}
+              onDisconnect={async (server) => {
+                const profile = connections.find((item) => item.server === server);
+                if (profile) await updateConnection({ ...profile, disabled: true });
               }}
             />
           ) : null}

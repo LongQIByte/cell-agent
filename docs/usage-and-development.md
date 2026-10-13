@@ -21,6 +21,8 @@ node scripts/pairing.mjs
 
 手机与电脑连接同一 Wi-Fi，打开 `http://电脑局域网IP:8787`。在 Settings 填入 `ws://电脑局域网IP:8787/ws` 与生成的配对密钥，点击「保存并连接」，然后进入 Projects。APK 下载地址是 `http://电脑局域网IP:8787/downloads/codex-remote.apk`（完成构建后可用）。APK 包含 JavaScript，运行时不需要 Metro 或 Expo Go。
 
+Settings 支持保存多个服务地址并同时连接多台电脑。保存新地址会添加连接，保存已有地址会更新该服务的密钥；其他服务保持连接。Projects 汇总各台电脑的项目与会话，响应慢或断开的电脑不会阻塞其他电脑。可以单独断开、重新连接某个服务，重启应用后会恢复已保存的连接与断开状态；旧版保存的单个连接会自动保留。
+
 配对密钥、二维码和手机安装步骤在 `.local/`，不进入 Git，也不编译进 APK。重新启动服务会复用密钥和机器 ID。可以通过 `PUBLIC_HOST`、`DEVICE_NAME`、`RELAY_PORT` 指定地址、电脑名称和端口。
 
 ### 本机是 WSL 时

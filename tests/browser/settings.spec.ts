@@ -28,7 +28,8 @@ async function settingsFixture(page: Page, deferFirstCatalog = false) {
     },
   ];
   const sockets: WebSocketRoute[] = [];
-  let available = true;
+  const calls: { server: string; method: string; deviceId?: string }[] = [];
+  const unavailable = new Set<string>();
   await page.routeWebSocket('**/ws', (socket) => {
     sockets.push(socket);
     const first = new URL(socket.url()).hostname === 'settings-first.test';
@@ -36,7 +37,7 @@ async function settingsFixture(page: Page, deferFirstCatalog = false) {
     socket.onMessage((raw) => {
       const message = JSON.parse(String(raw));
       if (message.type === 'hello') {
-        if (!available) {
+        if (unavailable.has(new URL(socket.url()).hostname)) {
           void socket.close({ code: 1000 });
           return;
         }
@@ -52,14 +53,21 @@ async function settingsFixture(page: Page, deferFirstCatalog = false) {
           }),
         );
       } else if (message.type === 'request') {
+        calls.push({ server: socket.url(), method: message.method, deviceId: message.deviceId });
         // A confirmed machine must be saved even while its project catalog is
         // still loading; changing connections can cancel this request.
         if (first && deferFirstCatalog && message.method === 'projects/list') return;
+        const session = { id: 'same-session', projectId: 'same-project', cwd: '/workspace', name: first ? 'First service chat' : 'Other service chat', updatedAt: 1, status: 'idle' };
+        const project = { id: 'same-project', deviceId: 'shared-id', name: first ? 'First project' : 'Other project', path: '/workspace', available: true, updatedAt: 1, sessions: [session] };
+        const result = message.method === 'projects/list' ? { projects: message.deviceId === 'shared-id' ? [project] : [], recentSessions: [] }
+          : message.method === 'models/list' ? { models: [] }
+          : message.method === 'sessions/read' ? { session, model: null, reasoningEffort: null, permissions: null, activeTurnId: null, requests: [], nextCursor: null, sequence: 0,
+            items: [{ id: 'reply', turnId: 'same-turn', kind: 'assistant', timestamp: 1, text: first ? 'First service answer' : 'Other service answer' }] } : {};
         socket.send(
           JSON.stringify({
             type: 'response',
             id: message.id,
-            result: { projects: [], recentSessions: [] },
+            result,
           }),
         );
       }
@@ -77,12 +85,14 @@ async function settingsFixture(page: Page, deferFirstCatalog = false) {
   ).toBeVisible();
   return {
     settings,
-    interrupt: async () => {
-      available = false;
-      await sockets.at(-1)!.close({ code: 1000 });
+    calls,
+    interrupt: async (server = firstConnection.server) => {
+      const hostname = new URL(server).hostname;
+      unavailable.add(hostname);
+      for (const socket of sockets.filter((socket) => new URL(socket.url()).hostname === hostname)) await socket.close({ code: 1000 });
     },
-    restore: () => {
-      available = true;
+    restore: (server = firstConnection.server) => {
+      unavailable.delete(new URL(server).hostname);
     },
   };
 }
@@ -202,7 +212,7 @@ test('changing services binds repeated device ids to the matching saved address 
   await expect(details.getByLabel('配对密钥', { exact: true })).toHaveValue(secondConnection.token);
   await expect(details.getByLabel('配对密钥', { exact: true })).toHaveAttribute('type', 'password');
   await details.getByRole('button', { name: '关闭连接详情', exact: true }).click();
-  await expect(settings.getByRole('button', { name: /查看电脑 First computer/ })).toHaveCount(0);
+  await expect(settings.getByRole('button', { name: '查看电脑 First computer 的连接，在线', exact: true })).toBeVisible();
   await settings.getByLabel('服务地址', { exact: true }).fill(firstConnection.server);
   await settings.getByLabel('配对密钥', { exact: true }).fill(incorrectKey);
   await settings.getByRole('button', { name: '保存连接', exact: true }).click();
@@ -215,4 +225,52 @@ test('changing services binds repeated device ids to the matching saved address 
   await expect(details.getByLabel('服务地址', { exact: true })).toHaveValue(firstConnection.server);
   await expect(details.getByLabel('配对密钥', { exact: true })).toHaveValue(incorrectKey);
   await expect(details.getByLabel('配对密钥', { exact: true })).toHaveAttribute('type', 'password');
+});
+
+test('independent services stay connected, route copied IDs correctly and survive reload and a single-service disconnect', async ({ page }) => {
+  const fixture = await settingsFixture(page);
+  const { settings } = fixture;
+  await settings.getByLabel('服务地址', { exact: true }).fill(secondConnection.server);
+  await settings.getByLabel('配对密钥', { exact: true }).fill(secondConnection.token);
+  await settings.getByRole('button', { name: '保存连接', exact: true }).click();
+  await expect(settings.getByRole('button', { name: '查看电脑 First computer 的连接，在线', exact: true })).toBeVisible();
+  await expect(settings.getByRole('button', { name: '查看电脑 Other service computer 的连接，在线', exact: true })).toBeVisible();
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('codex-remote:connections')!))).toEqual([firstConnection, secondConnection]);
+  await page.getByRole('tab', { name: 'Projects', exact: true }).click();
+  await expect(page.getByText('2 台电脑在线', { exact: true })).toBeVisible();
+  for (const [chat, answer] of [['First service chat', 'First service answer'], ['Other service chat', 'Other service answer']]) {
+    await page.getByRole('button', { name: `打开会话 ${chat}`, exact: true }).click();
+    await expect(page.getByTestId('assistant-message')).toHaveText(answer);
+    await page.keyboard.press('Escape');
+  }
+  const reads = fixture.calls.filter((call) => call.method === 'sessions/read');
+  expect(reads.map((call) => new URL(call.server).hostname)).toEqual(['settings-first.test', 'settings-second.test']);
+  expect(reads.every((call) => call.deviceId === 'shared-id')).toBe(true);
+  await page.reload();
+  await expect(page.getByText('2 台电脑在线', { exact: true })).toBeVisible();
+  await page.getByRole('tab', { name: 'Settings', exact: true }).click();
+  await settings.getByRole('button', { name: `断开服务 ${firstConnection.server}`, exact: true }).click();
+  await expect(settings.getByRole('button', { name: '查看电脑 First computer 的连接，未知', exact: true })).toBeVisible();
+  await expect(settings.getByRole('button', { name: '查看电脑 Other service computer 的连接，在线', exact: true })).toBeVisible();
+  await page.reload();
+  await page.getByRole('tab', { name: 'Settings', exact: true }).click();
+  await expect(settings.getByRole('button', { name: '查看电脑 First computer 的连接，未知', exact: true })).toBeVisible();
+  await expect(settings.getByRole('button', { name: '查看电脑 Other service computer 的连接，在线', exact: true })).toBeVisible();
+  await settings.getByRole('button', { name: `重新连接服务 ${firstConnection.server}`, exact: true }).click();
+  await expect(settings.getByRole('button', { name: '查看电脑 First computer 的连接，在线', exact: true })).toBeVisible();
+  await fixture.interrupt(firstConnection.server);
+  await expect(settings.getByRole('button', { name: '查看电脑 First computer 的连接，未知', exact: true })).toBeVisible();
+  await expect(settings.getByRole('button', { name: '查看电脑 Other service computer 的连接，在线', exact: true })).toBeVisible();
+  await page.getByRole('tab', { name: 'Projects', exact: true }).click();
+  await page.getByRole('button', { name: '打开会话 Other service chat', exact: true }).click();
+  await expect(page.getByTestId('assistant-message')).toHaveText('Other service answer');
+});
+
+test('a slow service cannot hold up the project catalog from a newly added computer', async ({ page }) => {
+  const { settings } = await settingsFixture(page, true);
+  await settings.getByLabel('服务地址', { exact: true }).fill(secondConnection.server);
+  await settings.getByLabel('配对密钥', { exact: true }).fill(secondConnection.token);
+  await settings.getByRole('button', { name: '保存连接', exact: true }).click();
+  await page.getByRole('tab', { name: 'Projects', exact: true }).click();
+  await expect(page.getByRole('button', { name: '打开会话 Other service chat', exact: true })).toBeVisible();
 });

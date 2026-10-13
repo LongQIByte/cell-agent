@@ -70,7 +70,7 @@ export function DeviceConnectionDetail({
                 {status}
               </Text>
               <Text style={styles.help}>
-                同一服务下的电脑共用此连接信息。修改并保存后会重新连接。
+                此电脑使用下方的连接信息。修改密钥只会重连这个服务，其他电脑保持连接。
               </Text>
               <ConnectionForm connection={connection} onSave={onSave} />
               <View style={styles.connectionStatus}>

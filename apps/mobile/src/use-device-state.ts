@@ -7,10 +7,10 @@ import { readCache, saveCache } from './storage';
 const disconnected = (): ClientState => ({ status: 'disconnected', devices: [] });
 
 // A computer is known as soon as the relay confirms it, independently of catalog reads.
-export function useDeviceState(server: string | undefined) {
+export function useDeviceState(server: string | undefined, prefix = 'known-computers') {
   const [state, setState] = useState<ClientState>(disconnected);
   const current = useRef({ server, state });
-  const key = `known-computers:${server ?? 'none'}`;
+  const key = `${prefix}:${server ?? 'none'}`;
   useEffect(() => {
     const snapshot = { server, state: disconnected() };
     current.current = snapshot;
