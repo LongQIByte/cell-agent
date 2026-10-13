@@ -1,5 +1,4 @@
-import { basename, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { basename } from 'node:path';
 
 export function markdownImageSources(text: string): string[] {
   // Ignore fenced code examples; only actual image references authorize reads.
@@ -32,18 +31,6 @@ export function itemImages(item: any): { source: string; name: string }[] {
   if (item.type === 'mcpToolCall') content(item.result?.content ?? []);
   if (item.type === 'dynamicToolCall') content(item.contentItems ?? []);
   return images;
-}
-
-export function imagePath(source: string, cwd: string): string {
-  let path = source;
-  if (path.startsWith('file:')) return fileURLToPath(path);
-  if (path.startsWith('sandbox:')) path = path.slice('sandbox:'.length);
-  try { path = decodeURIComponent(path); } catch { /* Native paths may contain literal %. */ }
-  if (process.platform === 'win32' && path.startsWith('/')) {
-    const distro = /^\\\\(?:wsl\.localhost|wsl\$)\\([^\\]+)/i.exec(cwd)?.[1];
-    if (distro) return `\\\\wsl.localhost\\${distro}${path.replace(/\//g, '\\')}`;
-  }
-  return resolve(cwd, path);
 }
 
 export function imageMime(data: Buffer): string | null {

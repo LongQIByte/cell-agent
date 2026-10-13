@@ -12,6 +12,8 @@ import {
 } from 'react-native';
 import { Renderer, useMarkdown, type MarkedStyles } from 'react-native-marked';
 import { scaleTextStyles, useThemedStyles, useUI, type Palette } from './ui';
+import { RemoteFileLink } from './RemoteFileLink';
+import { isRemoteFileLink } from './remote-file';
 import { ChatImage } from './ChatImage';
 
 class ChatMarkdownRenderer extends Renderer {
@@ -69,6 +71,7 @@ class ChatMarkdownRenderer extends Renderer {
   }
 
   link(children: string | ReactNode[], href: string, textStyle?: TextStyle): ReactNode {
+    if (isRemoteFileLink(href)) return <RemoteFileLink key={this.getKey()} source={href} style={textStyle}>{children}</RemoteFileLink>;
     return (
       <Text
         key={this.getKey()}

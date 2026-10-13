@@ -240,7 +240,7 @@ test('independent services stay connected, route copied IDs correctly and surviv
   await expect(page.getByText('2 台电脑在线', { exact: true })).toBeVisible();
   for (const [chat, answer] of [['First service chat', 'First service answer'], ['Other service chat', 'Other service answer']]) {
     await page.getByRole('button', { name: `打开会话 ${chat}`, exact: true }).click();
-    await expect(page.getByTestId('assistant-message')).toHaveText(answer);
+    await expect(page.getByTestId('assistant-message')).toContainText(answer);
     await page.keyboard.press('Escape');
   }
   const reads = fixture.calls.filter((call) => call.method === 'sessions/read');
@@ -263,7 +263,7 @@ test('independent services stay connected, route copied IDs correctly and surviv
   await expect(settings.getByRole('button', { name: '查看电脑 Other service computer 的连接，在线', exact: true })).toBeVisible();
   await page.getByRole('tab', { name: 'Projects', exact: true }).click();
   await page.getByRole('button', { name: '打开会话 Other service chat', exact: true }).click();
-  await expect(page.getByTestId('assistant-message')).toHaveText('Other service answer');
+  await expect(page.getByTestId('assistant-message')).toContainText('Other service answer');
 });
 
 test('a slow service cannot hold up the project catalog from a newly added computer', async ({ page }) => {

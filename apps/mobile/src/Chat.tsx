@@ -14,6 +14,7 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import * as Clipboard from 'expo-clipboard';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import {
@@ -93,8 +94,10 @@ function ExecutionItem({ item }: { item: ChatItem }) {
     </View>
   );
 }
-const Message = React.memo(function Message({ item }: { item: ChatItem }) {
+const Message = React.memo(function Message({ item, complete }: { item: ChatItem; complete: boolean }) {
   const { common } = useUI();
+  const [copyState, setCopyState] = useState('');
+  useEffect(() => { if (copyState) { const timer = setTimeout(() => setCopyState(''), 2000); return () => clearTimeout(timer); } }, [copyState]);
   const styles = useThemedStyles(createStyles);
   if (item.kind === 'command' || item.kind === 'file' || item.kind === 'activity')
     return <><ExecutionItem item={item} />{item.images?.map((image, index) =>
@@ -124,6 +127,11 @@ const Message = React.memo(function Message({ item }: { item: ChatItem }) {
         <Text style={styles.attachedNames}>{item.attachments.join(' · ')}</Text>
       )}
       {item.images?.map((image, index) => <ChatImage key={`${image.source}:${index}`} source={image.source} name={image.name} />)}
+      {item.kind === 'assistant' && complete && !!item.text && <View style={styles.copyRow}>
+        <Pressable accessibilityRole="button" accessibilityLabel="复制完整回复" onPress={() => {
+          void Clipboard.setStringAsync(item.text).then((copied) => setCopyState(copied ? '已复制' : '复制失败，请重试')).catch(() => setCopyState('复制失败，请重试'));
+        }} style={styles.copyButton}><Icon name="copy" size={16} /><Text style={styles.copyText}>{copyState || '复制'}</Text></Pressable>
+      </View>}
     </View>
   );
 });
@@ -820,7 +828,7 @@ export function Chat({
           </View>}
           <MessageImageContext.Provider value={{ client, deviceId, threadId: session.id, online }}>
           {history.items.slice(visibleStart).map((item) => (
-            <Message key={chatItemKey(item)} item={item} />
+            <Message key={chatItemKey(item)} item={item} complete={item.turnId !== history.activeTurnId && item.status !== 'inProgress'} />
           ))}
           </MessageImageContext.Provider>
           {history.requests.map((request) => (
@@ -1006,6 +1014,9 @@ export function Chat({
 }
 const createStyles = (palette: Palette) =>
   StyleSheet.create({
+    copyRow: { flexDirection: 'row', marginTop: 8 },
+    copyButton: { flexDirection: 'row', gap: 6, alignItems: 'center', paddingVertical: 8, paddingHorizontal: 4 },
+    copyText: { color: palette.secondary, fontSize: 12 },
     chat: { flex: 1, backgroundColor: palette.background },
     historyArea: { flex: 1, minHeight: 0 },
     scrollToLatest: {

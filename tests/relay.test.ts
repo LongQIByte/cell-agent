@@ -136,3 +136,43 @@ test(
     }
   },
 );
+
+test('file capabilities stream ranges from the owning machine, reject guesses, and revoke on client disconnect', { timeout: 15000 }, async () => {
+  const relay = createRelay({ token, dbPath: ':memory:', host: '127.0.0.1', port: 0 });
+  const address = await relay.listen() as { port: number };
+  const url = `ws://127.0.0.1:${address.port}/ws`; const http = `http://127.0.0.1:${address.port}`;
+  const agent = new WebSocket(url); const nextAgent = inbox(agent);
+  const mobile = new WebSocket(url); const nextMobile = inbox(mobile);
+  const data = Buffer.alloc(1024 * 1024 + 17, 'video-data');
+  const chunks: number[] = [];
+  try {
+    await Promise.all([once(agent, 'open'), once(mobile, 'open')]);
+    agent.send(JSON.stringify({ type: 'hello', role: 'agent', token, version: PROTOCOL_VERSION, device: { id: 'files-machine', name: 'files', platform: 'linux' } }));
+    mobile.send(JSON.stringify({ type: 'hello', role: 'mobile', token, version: PROTOCOL_VERSION }));
+    await Promise.all([nextAgent((m) => m.type === 'ready'), nextMobile((m) => m.type === 'ready')]);
+    agent.on('message', (raw) => {
+      const message = JSON.parse(raw.toString());
+      if (message.method === 'files/read') {
+        chunks.push(message.params.length);
+        agent.send(JSON.stringify({ type: 'response', id: message.id, result: { data: data.subarray(message.params.offset, message.params.offset + message.params.length).toString('base64') } }));
+      }
+    });
+    mobile.send(JSON.stringify({ type: 'request', id: 'file', deviceId: 'files-machine', method: 'files/open', params: { threadId: 'session', source: 'video.webm' } }));
+    const request = await nextAgent((m) => m.method === 'files/open');
+    agent.send(JSON.stringify({ type: 'response', id: request.id, result: { id: 'agent-handle', name: '视频.webm', size: data.length, mimeType: 'video/webm', expiresAt: Date.now() + 900000 } }));
+    const result = (await nextMobile((m) => m.id === 'file')).result;
+    assert.equal(result.id, undefined); assert.ok(result.ticket);
+    assert.equal((await fetch(`${http}/files/guess`)).status, 410);
+    const response = await fetch(`${http}/files/${result.ticket}`, { headers: { Range: 'bytes=13-300000' } });
+    assert.equal(response.status, 206); assert.equal(response.headers.get('content-range'), `bytes 13-300000/${data.length}`);
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), data.subarray(13, 300001));
+    assert.ok(chunks.every((length) => length <= 256 * 1024));
+    const suffix = await fetch(`${http}/files/${result.ticket}`, { headers: { Range: 'bytes=-17' } });
+    assert.deepEqual(Buffer.from(await suffix.arrayBuffer()), data.subarray(-17));
+    const invalid = await fetch(`${http}/files/${result.ticket}`, { headers: { Range: 'bytes=9000000-' } });
+    assert.equal(invalid.status, 416);
+    const head = await fetch(`${http}/files/${result.ticket}`, { method: 'HEAD' }); assert.equal(head.headers.get('content-length'), String(data.length));
+    const closed = once(mobile, 'close'); mobile.close(); await closed;
+    assert.equal((await fetch(`${http}/files/${result.ticket}`)).status, 410);
+  } finally { mobile.terminate(); agent.terminate(); await relay.close(); }
+});

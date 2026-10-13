@@ -38,15 +38,18 @@ export function configuration() {
   const port = Number(process.env.RELAY_PORT ?? old.port ?? 8787);
   const host = lanHost();
   const tls = !!process.env.TLS_CERT;
+  const publicUrl = process.env.PUBLIC_URL ? new URL(process.env.PUBLIC_URL) : null;
+  if (publicUrl && (!['http:', 'https:'].includes(publicUrl.protocol) || publicUrl.username || publicUrl.password || publicUrl.search || publicUrl.hash)) throw new Error('PUBLIC_URL must be an http(s) URL without credentials, query or fragment');
+  const web = publicUrl ? publicUrl.toString().replace(/\/$/, '') : `${tls ? 'https' : 'http'}://${host}:${port}`;
   const config = {
     token,
     host,
     port,
     deviceName: process.env.DEVICE_NAME ?? old.deviceName ?? hostname(),
-    server: `${tls ? 'wss' : 'ws'}://${host}:${port}/ws`,
-    web: `${tls ? 'https' : 'http'}://${host}:${port}`,
-    apk: `${tls ? 'https' : 'http'}://${host}:${port}/downloads/codex-remote.apk`,
-    devApk: `${tls ? 'https' : 'http'}://${host}:${port}/downloads/codex-remote-dev.apk`,
+    server: `${web.replace(/^http/, 'ws')}/ws`,
+    web,
+    apk: `${web}/downloads/codex-remote.apk`,
+    devApk: `${web}/downloads/codex-remote-dev.apk`,
     metro: `http://${host}:8081`,
     devClient: `codex-remote-dev://expo-development-client/?url=${encodeURIComponent(`http://${host}:8081`)}`,
   };

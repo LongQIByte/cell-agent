@@ -35,6 +35,7 @@ type Route = {
   originalId: string;
   agent: WebSocket;
   timer: ReturnType<typeof setTimeout>;
+  method: string;
 };
 type Peer = {
   socket: WebSocket;
@@ -68,6 +69,68 @@ export function createRelay(options: RelayOptions) {
   const agents = new Map<string, WebSocket>();
   const peers = new Map<WebSocket, Peer>();
   const routes = new Map<string, Route>();
+  const transfers = new Map<string, { agent: WebSocket; client: WebSocket; id: string; name: string; size: number; mimeType: string; expiresAt: number }>();
+  const reads = new Map<string, { agent: WebSocket; resolve: (value: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+  function readFileChunk(agent: WebSocket, id: string, offset: number, length: number, signal: AbortSignal): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+      const requestId = randomUUID();
+      const finish = (value?: any, error?: Error) => {
+        const pending = reads.get(requestId); if (!pending) return;
+        clearTimeout(pending.timer); reads.delete(requestId); signal.removeEventListener('abort', cancel);
+        if (error) reject(error); else resolve(Buffer.from(value.data, 'base64'));
+      };
+      const cancel = () => finish(undefined, new Error('传输已取消'));
+      if (signal.aborted) { reject(new Error('传输已取消')); return; }
+      signal.addEventListener('abort', cancel, { once: true });
+      const timer = setTimeout(() => finish(undefined, new Error('电脑响应超时')), 30000);
+      reads.set(requestId, { agent, resolve: (value) => finish(value), reject: (error) => finish(undefined, error), timer });
+      send(agent, { type: 'request', id: requestId, method: 'files/read', params: { id, offset, length } });
+    });
+  }
+  async function serveTransfer(req: IncomingMessage, res: ServerResponse, ticket: string) {
+    const transfer = transfers.get(ticket);
+    if (!transfer || transfer.expiresAt < Date.now()) {
+      transfers.delete(ticket); res.writeHead(410); res.end('文件预览已过期，请重新打开'); return;
+    }
+    if (transfer.agent.readyState !== WebSocket.OPEN) { res.writeHead(503); res.end('电脑已离线'); return; }
+    let start = 0; let end = transfer.size - 1;
+    if (req.headers.range) {
+      const match = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range);
+      if (!match || (!match[1] && !match[2])) { res.writeHead(416, { 'Content-Range': `bytes */${transfer.size}` }); res.end(); return; }
+      if (!match[1]) start = Math.max(0, transfer.size - Number(match[2]));
+      else { start = Number(match[1]); if (match[2]) end = Math.min(end, Number(match[2])); }
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start >= transfer.size) {
+        res.writeHead(416, { 'Content-Range': `bytes */${transfer.size}` }); res.end(); return;
+      }
+    }
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Content-Type', transfer.mimeType);
+    res.setHeader('Content-Length', Math.max(0, end - start + 1));
+    const inline = /^(?:image|video|audio)\//.test(transfer.mimeType) && !req.url?.includes('download=1');
+    res.setHeader('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(transfer.name)}`);
+    if (req.headers.range) res.setHeader('Content-Range', `bytes ${start}-${end}/${transfer.size}`);
+    res.statusCode = req.headers.range ? 206 : 200;
+    if (req.method === 'HEAD') { res.end(); return; }
+    const controller = new AbortController();
+    res.on('close', () => controller.abort());
+    try {
+      while (start <= end && !controller.signal.aborted) {
+        const length = Math.min(256 * 1024, end - start + 1);
+        const chunk = await readFileChunk(transfer.agent, transfer.id, start, length, controller.signal);
+        if (chunk.length !== length) throw new Error('文件在传输期间发生变化');
+        start += chunk.length;
+        if (!res.write(chunk)) await new Promise<void>((resolve) => {
+          const done = () => { res.off('drain', done); res.off('close', done); resolve(); };
+          res.once('drain', done); res.once('close', done);
+        });
+      }
+      res.end();
+    } catch (error) {
+      if (!res.headersSent) { res.writeHead(502); res.end('读取远程文件失败'); } else res.destroy(error as Error);
+    }
+  }
   const digest = createHash('sha256').update(options.token).digest();
   const listDevices = (): Device[] =>
     (
@@ -123,6 +186,9 @@ export function createRelay(options: RelayOptions) {
       res.writeHead(400);
       res.end();
       return;
+    }
+    if (pathname.startsWith('/files/')) {
+      void serveTransfer(req, res, pathname.slice('/files/'.length)); return;
     }
     if (pathname === '/health') {
       res.setHeader('Content-Type', 'application/json');
@@ -285,6 +351,15 @@ export function createRelay(options: RelayOptions) {
           fail(socket, request.id, { code: 'OVERLOADED', message: '请求过多，请稍后再试' });
           return;
         }
+        if (request.method === 'files/read') { fail(socket, request.id, { code: 'INVALID_REQUEST', message: '请使用文件传输地址' }); return; }
+        if (request.method === 'files/close') {
+          const transfer = transfers.get(String(request.params.ticket));
+          if (transfer?.client === socket) {
+            transfers.delete(String(request.params.ticket));
+            send(transfer.agent, { type: 'request', id: randomUUID(), method: 'files/close', params: { id: transfer.id } });
+          }
+          send(socket, { type: 'response', id: request.id, result: {} }); return;
+        }
         const agent = agents.get(request.deviceId ?? '');
         if (!agent || agent.readyState !== WebSocket.OPEN) {
           fail(socket, request.id, {
@@ -302,13 +377,27 @@ export function createRelay(options: RelayOptions) {
           });
           finishRoute(routeId);
         }, options.requestTimeoutMs ?? 90000);
-        routes.set(routeId, { client: socket, originalId: request.id, agent, timer });
+        routes.set(routeId, { client: socket, originalId: request.id, agent, timer, method: request.method });
         send(agent, { ...request, id: routeId });
         return;
       }
       if (message.type === 'response' && typeof message.id === 'string') {
+        const read = reads.get(message.id);
+        if (read?.agent === socket) {
+          if (message.error) read.reject(new Error((message.error as RpcError).message)); else read.resolve(message.result);
+          return;
+        }
         const route = routes.get(message.id);
         if (!route || route.agent !== socket) return;
+        if (route.method === 'files/open' && !message.error) {
+          const file = message.result as any;
+          // A random, short-lived capability URL avoids exposing the pairing
+          // key to image/video players. It stays bound to this exact agent.
+          const ticket = randomUUID();
+          for (const [key, value] of transfers) if (value.expiresAt < Date.now()) transfers.delete(key);
+          transfers.set(ticket, { ...file, agent: socket, client: route.client });
+          message.result = { ticket, name: file.name, size: file.size, mimeType: file.mimeType, expiresAt: file.expiresAt };
+        }
         send(route.client, {
           type: 'response',
           id: route.originalId,
@@ -332,6 +421,11 @@ export function createRelay(options: RelayOptions) {
     socket.on('close', () => {
       clearTimeout(peer.authTimer);
       peers.delete(socket);
+      for (const read of reads.values()) if (read.agent === socket) read.reject(new Error('电脑连接中断'));
+      for (const [ticket, transfer] of transfers) if (transfer.client === socket || transfer.agent === socket) {
+        transfers.delete(ticket);
+        send(transfer.agent, { type: 'request', id: randomUUID(), method: 'files/close', params: { id: transfer.id } });
+      }
       if (peer.deviceId && agents.get(peer.deviceId) === socket) {
         agents.delete(peer.deviceId);
         db.prepare('UPDATE devices SET last_seen=? WHERE id=?').run(Date.now(), peer.deviceId);
@@ -374,6 +468,8 @@ export function createRelay(options: RelayOptions) {
     },
     async close() {
       clearInterval(heartbeat);
+      for (const read of reads.values()) read.reject(new Error('服务已关闭'));
+      transfers.clear();
       for (const peer of peers.values()) peer.socket.terminate();
       for (const id of routes.keys()) finishRoute(id);
       await new Promise<void>((ok) => wss.close(() => ok()));

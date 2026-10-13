@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { Image, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import type { UploadedFile } from '@codex-remote/protocol';
 import { Button, useThemedStyles, useUI, type Palette } from './ui';
+import { ImagePreview } from './ImagePreview';
 import { Icon } from './icons';
 
 export function Attachments({ files, uploading, onRemove }: {
@@ -25,13 +26,7 @@ export function Attachments({ files, uploading, onRemove }: {
       </View>)}
       {uploading && <Text style={styles.name}>上传中…</Text>}
     </ScrollView>
-    <Modal visible={preview !== null} transparent animationType="fade" onRequestClose={() => setPreview(null)}>
-      <View style={styles.overlay}>
-        {preview?.previewUri && <Image source={{ uri: preview.previewUri }} resizeMode="contain" style={styles.preview} />}
-        <Text style={styles.previewName}>{preview?.name}</Text>
-        <Button label="关闭照片预览" onPress={() => setPreview(null)} />
-      </View>
-    </Modal>
+    {preview?.previewUri && <ImagePreview uri={preview.previewUri} name={preview.name} closeLabel="关闭照片预览" onClose={() => setPreview(null)} />}
   </>;
 }
 const createStyles = (palette: Palette) => StyleSheet.create({
