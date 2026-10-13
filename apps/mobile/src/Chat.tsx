@@ -260,6 +260,7 @@ export function Chat({
   const styles = useThemedStyles(createStyles);
   const insets = useSafeAreaInsets();
   const scroll = useRef<ScrollView>(null);
+  const [showScrollToLatest, setShowScrollToLatest] = useState(false);
   const [history, setHistory] = useState<SessionHistory>({
     session,
     model: null,
@@ -749,6 +750,7 @@ export function Chat({
       enabled={Platform.OS === 'ios'}
       testID="chat-screen"
     >
+      <View style={styles.historyArea}>
       <ScrollView
         ref={scroll}
         testID="chat-history"
@@ -772,6 +774,7 @@ export function Chat({
           // first scrollToEnd completes. Keep the initial bottom intent alive.
           if (atBottom && !loading && history.items.length) enteringAtBottom.current = false;
           pinned.current = enteringAtBottom.current || atBottom;
+          setShowScrollToLatest(!pinned.current);
           if (!enteringAtBottom.current && movingUp && contentOffset.y < 160 && hasOlder && !loading) void loadOlder();
         }}
         onContentSizeChange={(_, height) => {
@@ -859,6 +862,24 @@ export function Chat({
           )}
         </View>
       </ScrollView>
+      {showScrollToLatest && (
+        <Pressable
+          testID="scroll-to-latest"
+          accessibilityRole="button"
+          accessibilityLabel="回到最新消息"
+          onPress={() => {
+            prepending.current = null;
+            pinned.current = true;
+            enteringAtBottom.current = true;
+            setShowScrollToLatest(false);
+            scroll.current?.scrollToEnd({ animated: false });
+          }}
+          style={({ pressed }) => [styles.scrollToLatest, pressed && { opacity: 0.7 }]}
+        >
+          <Icon name="arrowDown" size={22} />
+        </Pressable>
+      )}
+      </View>
       <View style={[styles.composerOuter, { paddingBottom: keyboardVisible ? 12 : Math.max(12, insets.bottom) }]}>
         <View style={styles.chatWidth}>
           <TurnSettingsPicker
@@ -986,6 +1007,13 @@ export function Chat({
 const createStyles = (palette: Palette) =>
   StyleSheet.create({
     chat: { flex: 1, backgroundColor: palette.background },
+    historyArea: { flex: 1, minHeight: 0 },
+    scrollToLatest: {
+      position: 'absolute', bottom: 16, alignSelf: 'center',
+      width: 44, height: 44, borderRadius: 22,
+      alignItems: 'center', justifyContent: 'center',
+      backgroundColor: palette.soft, borderWidth: 1, borderColor: palette.line,
+    },
     messages: { flexGrow: 1, paddingTop: 20, paddingBottom: 22 },
     chatWidth: { width: '100%', maxWidth: 760, alignSelf: 'center', paddingHorizontal: 16 },
     message: { marginVertical: 13, alignSelf: 'flex-start', width: '100%', maxWidth: '100%' },

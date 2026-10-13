@@ -8,6 +8,7 @@ type Name =
   | 'settings'
   | 'attach'
   | 'send'
+  | 'arrowDown'
   | 'stop'
   | 'search'
   | 'close'
@@ -31,6 +32,7 @@ export function Icon({
     chevron: 'm6 9 6 6 6-6',
     attach: 'm9 17 8-8a3 3 0 0 0-4-4l-8 8a5 5 0 0 0 7 7l8-8',
     send: 'M12 19V5m-6 6 6-6 6 6',
+    arrowDown: 'M12 5v14m-6-6 6 6 6-6',
     search: 'm16 16 4 4',
     close: 'm6 6 12 12M18 6 6 18',
     back: 'm14 6-6 6 6 6',
