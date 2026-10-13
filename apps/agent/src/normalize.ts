@@ -21,6 +21,21 @@ function printable(value: unknown): string {
   if (value === undefined || value === null) return '';
   return (typeof value === 'string' ? value : JSON.stringify(value, null, 2)).slice(0, 100000);
 }
+// Native asynchronous answers are persisted as a protocol envelope. Normalize
+// at the transcript boundary so live events and restored history share the view.
+export function questionReplyText(text: string): string {
+  const match = /^\s*<send_user_message_question_reply>\s*([\s\S]*?)\s*<\/send_user_message_question_reply>\s*$/.exec(text);
+  if (!match) return text;
+  try {
+    const replies: unknown = JSON.parse(match[1]);
+    if (!Array.isArray(replies) || !replies.length) return '已提交提问回复';
+    return replies.map((reply) => {
+      if (!reply || typeof reply.answer !== 'string') return '已提交提问回复';
+      return typeof reply.question === 'string' && reply.question.trim()
+        ? `${reply.question}\n回答：${reply.answer}` : reply.answer;
+    }).join('\n\n');
+  } catch { return '已提交提问回复（内容无法解析）'; }
+}
 export function normalizeItem(
   item: any,
   turnId: string,
@@ -40,7 +55,7 @@ export function normalizeItem(
           );
           const knownName = match && attachmentName(match[2]);
           if (knownName && knownName === match[1]) attachments.push(knownName);
-          else texts.push(content.text);
+          else texts.push(questionReplyText(content.text));
         } else if (content.type === 'localImage' || content.type === 'image') {
           attachments.push(
             content.path ? (attachmentName(content.path) ?? basename(content.path)) : '图片',
