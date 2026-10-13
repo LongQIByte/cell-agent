@@ -14,7 +14,7 @@ export function ChatImage({ source, name = '图片' }: { source: string; name?: 
   const { width: screenWidth } = useWindowDimensions();
   const [dimensions, setDimensions] = useState<{ width: number; height: number } | null>(null);
   const maxWidth = Math.max(1, Math.min(260, screenWidth * 0.88 - 64));
-  const scale = dimensions ? Math.min(1, maxWidth / dimensions.width, 220 / dimensions.height) : 1;
+  const scale = dimensions ? Math.min(maxWidth / dimensions.width, 220 / dimensions.height) : 1;
   const size = dimensions ? { width: dimensions.width * scale, height: dimensions.height * scale }
     : { width: maxWidth, height: 120 };
   const [uri, setUri] = useState<string | null>(null);
