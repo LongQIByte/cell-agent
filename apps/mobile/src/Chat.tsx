@@ -275,6 +275,7 @@ export function Chat({
   const [uploading, setUploading] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [recent, setRecent] = useState<RecentImage[]>([]);
+  const attachmentBusy = useRef(false);
   const online = clientState.status === 'connected' && clientState.devices.some((d) => d.id === deviceId && d.online);
   const attempt = useRef<SessionDraft['attempt']>(null);
   const latestDraft = useRef<SessionDraft>({ text: '', files: [], settings: null, attempt: null });
@@ -286,9 +287,14 @@ export function Chat({
     let checking = false;
     let cancelled = false;
     const check = async () => {
-      if (checking) return;
+      if (checking || attachmentBusy.current) return;
       checking = true;
-      try { const images = await findRecentImages(); if (!cancelled) setRecent(images); }
+      try {
+        const images = await findRecentImages();
+        const added = images.filter((image) => latestDraft.current.files.some((file) => file.name === image.filename));
+        if (added.length) await handleRecentImages(added);
+        if (!cancelled) setRecent(images.filter((image) => !added.includes(image)));
+      }
       catch { /* Missing/limited permission leaves manual attachment selection available. */ }
       finally { checking = false; }
     };
@@ -481,7 +487,8 @@ export function Chat({
     }
   }
   async function pick() {
-    if (!client || !draftReady || uploading) return;
+    if (!client || !draftReady || uploading || attachmentBusy.current) return;
+    attachmentBusy.current = true;
     setError('');
     setUploading(true);
     try {
@@ -494,6 +501,7 @@ export function Chat({
     } catch (e) {
       if (alive.current) setError((e as Error).message);
     } finally {
+      attachmentBusy.current = false;
       if (alive.current) setUploading(false);
     }
   }
@@ -560,14 +568,15 @@ export function Chat({
       }
   }
   async function addRecent() {
-    if (!client || uploading || sending || !draftReady) return;
+    if (!client || uploading || sending || !draftReady || attachmentBusy.current) return;
+    attachmentBusy.current = true;
     setUploading(true); setError('');
     try {
       const assets = await Promise.all(recent.map(resolveRecentImage));
       await uploadAssets(assets, async (index) => { await handleRecentImages([recent[index]]); });
       setRecent([]);
     } catch (e) { if (alive.current) setError((e as Error).message); }
-    finally { if (alive.current) setUploading(false); }
+    finally { attachmentBusy.current = false; if (alive.current) setUploading(false); }
   }
   async function send() {
     if (

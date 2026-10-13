@@ -47,6 +47,7 @@ export class AgentService extends EventEmitter {
   private metrics = new Map<string, MetricsSnapshot>();
   private modes = new Map<string, 'default' | 'plan'>();
   private goals = new Map<string, SessionGoal | null>();
+  private goalRevisions = new Map<string, number>();
   private planCapability?: Promise<{ plan: boolean; planReason?: string }>;
   private metricSnapshot(threadId: string) {
     const value = this.metrics.get(threadId) ?? this.store.metrics<MetricsSnapshot>(threadId);
@@ -65,8 +66,9 @@ export class AgentService extends EventEmitter {
     })).catch((error: Error) => ({ plan: false, planReason: error.message }));
     const plan = await this.planCapability;
     try {
+      const revision = this.goalRevisions.get(threadId) ?? 0;
       const { goal } = await this.codex.call('thread/goal/get', { threadId });
-      this.goals.set(threadId, goal);
+      if ((this.goalRevisions.get(threadId) ?? 0) === revision) this.goals.set(threadId, goal);
       return { ...plan, goal: true, goalBudget: true };
     } catch (error) {
       return { ...plan, goal: false, goalBudget: false, goalReason: (error as Error).message };
@@ -165,6 +167,7 @@ export class AgentService extends EventEmitter {
     if (!threadId) return;
     if (method === 'thread/goal/updated' || method === 'thread/goal/cleared') {
       const goal = method.endsWith('cleared') ? null : params.goal;
+      this.goalRevisions.set(threadId, (this.goalRevisions.get(threadId) ?? 0) + 1);
       this.goals.set(threadId, goal);
       this.publish('session/goal', { threadId, goal });
       return;
@@ -616,11 +619,15 @@ export class AgentService extends EventEmitter {
         tokenBudget: z.number().int().positive().nullable().optional() }).parse(raw);
       const { thread } = await this.codex.call('thread/read', { threadId: p.threadId });
       await this.localSession(thread);
+      const revision = this.goalRevisions.get(p.threadId) ?? 0;
       const result = await this.codex.call(method === 'sessions/goal/set' ? 'thread/goal/set' : 'thread/goal/clear', { ...p, origin: 'user' });
       const goal = method.endsWith('clear') ? null : result.goal;
-      this.goals.set(p.threadId, goal);
-      this.publish('session/goal', { threadId: p.threadId, goal });
-      return { goal };
+      if ((this.goalRevisions.get(p.threadId) ?? 0) === revision) {
+        this.goals.set(p.threadId, goal);
+        this.goalRevisions.set(p.threadId, revision + 1);
+        this.publish('session/goal', { threadId: p.threadId, goal });
+      }
+      return { goal: this.goals.get(p.threadId) ?? null };
     }
     if (method === 'sessions/archive' || method === 'sessions/unarchive') {
       const { threadId } = z.object({ threadId: idSchema }).parse(raw);

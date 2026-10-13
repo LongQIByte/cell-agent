@@ -57,6 +57,21 @@ test('rename and fork use native metadata; Plan and Goal lifecycle recover canon
 const thread = (id: string, cwd: string, projectId: string | null, updatedAt = 1): ThreadFixture => ({
   id, cwd, projectId, name: id, updatedAt, createdAt: 1, model: 'model-a', reasoningEffort: 'low',
 });
+test('a goal notification arriving during a read cannot be overwritten by that older RPC snapshot', async () => {
+  const native = new NativeCodex(); native.threads = [thread('one', '/workspace', null)];
+  const service = new AgentService(native as unknown as CodexRpc, new AgentStore(':memory:'), 'machine', '/missing-codex-home');
+  const original = native.call.bind(native);
+  const latest = { threadId: 'one', objective: 'Goal', status: 'paused', tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0, createdAt: 1, updatedAt: 2 };
+  native.call = async (method, params) => {
+    if (method === 'thread/goal/get') {
+      native.emit('notification', { method: 'thread/goal/updated', params: { threadId: 'one', goal: latest } });
+      return { goal: { ...latest, status: 'active', updatedAt: 1 } };
+    }
+    return original(method, params);
+  };
+  try { assert.equal((await service.readSession('one')).goal?.status, 'paused'); }
+  finally { service.close(); }
+});
 test('metrics survive restart and ignore tool output, repeated snapshots, stale turns and other-thread events', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cell-agent-metrics-')));
   const native = new NativeCodex(); native.threads = [thread('one', root, null), thread('two', root, null)];
