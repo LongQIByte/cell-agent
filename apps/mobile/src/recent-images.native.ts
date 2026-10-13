@@ -18,8 +18,12 @@ export async function allowRecentImages() {
   return permission.granted;
 }
 export async function resolveRecentImage(image: RecentImage) {
-  const info = await MediaLibrary.getAssetInfoAsync(image.id);
-  const uri = info.localUri ?? (Platform.OS === 'android' ? info.uri : undefined);
+  const permission = await MediaLibrary.getPermissionsAsync(false, ['photo']);
+  if (!permission.granted) throw new Error('请在系统设置中允许 Codex Remote 读取照片，或使用添加附件选择图片');
+  // Android discovery already supplies a readable file URI. AssetInfo also reads
+  // GPS EXIF, which requires a separate location permission we do not need.
+  const info = Platform.OS === 'android' ? image : await MediaLibrary.getAssetInfoAsync(image.id);
+  const uri = 'localUri' in info ? info.localUri : info.uri;
   if (!uri) throw new Error('这张照片尚未下载到手机，请使用添加附件选择');
   return { uri, name: info.filename, mimeType: /\.png$/i.test(info.filename) ? 'image/png' : /\.webp$/i.test(info.filename) ? 'image/webp' : /\.heic$/i.test(info.filename) ? 'image/heic' : 'image/jpeg' };
 }
