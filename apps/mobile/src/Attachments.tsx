@@ -15,7 +15,7 @@ export function Attachments({ files, uploading, onRemove }: {
     <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator contentContainerStyle={styles.files} testID="draft-attachments">
       {files.map((file) => <View key={file.id} style={styles.card}>
         <Pressable accessibilityRole="button" accessibilityLabel={`预览附件 ${file.name}`} disabled={!file.previewUri} onPress={() => setPreview(file)} style={styles.imageButton}>
-          {file.previewUri ? <Image accessibilityLabel={`照片 ${file.name}`} source={{ uri: file.previewUri }} resizeMode="cover" style={styles.image} />
+          {file.previewUri ? <Image accessibilityLabel={`照片 ${file.name}`} source={{ uri: file.previewUri }} resizeMode="contain" style={styles.image} />
             : <Icon name="attach" size={24} color={palette.secondary} />}
         </Pressable>
         <Text numberOfLines={1} style={styles.name}>{file.name}</Text>
