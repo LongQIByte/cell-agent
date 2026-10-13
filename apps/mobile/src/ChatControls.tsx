@@ -28,6 +28,10 @@ export function ChatControls({ history, mode, onMode, client, deviceId, disabled
     return () => clearInterval(timer);
   }, [history.activeTurnId]);
   const metrics = history.metrics;
+  const usage = metrics?.usage;
+  const cacheHitRate = usage && Number.isFinite(usage.inputTokens) && usage.inputTokens > 0
+    && Number.isFinite(usage.cachedInputTokens) && usage.cachedInputTokens >= 0 && usage.cachedInputTokens <= usage.inputTokens
+    ? `${Math.round(1000 * usage.cachedInputTokens / usage.inputTokens) / 10}%` : '暂无数据';
   const elapsed = metrics ? Math.max(0, ((metrics.endedAt ?? Math.max(now, Date.now())) - metrics.startedAt) / 1000) : null;
   const remaining = metrics?.contextWindow && metrics.contextUsed !== null
     ? Math.max(0, Math.min(100, 100 * (1 - metrics.contextUsed / metrics.contextWindow))) : null;
@@ -55,7 +59,7 @@ export function ChatControls({ history, mode, onMode, client, deviceId, disabled
       {mode === 'plan' && !history.activeTurnId && <Button label="进入执行" subtle disabled={disabled} onPress={() => onMode('default')} style={styles.execute} />}
     </View>
     <Pressable accessibilityRole="button" accessibilityLabel="运行指标详情" onPress={() => setPanel('metrics')} style={styles.status} testID="run-status">
-      <Text style={styles.statusText}>{label}{elapsed !== null ? ` · ${Math.floor(elapsed)}s` : ''} · {remaining !== null ? `上下文剩余 ${Math.round(remaining)}%` : '上下文暂无数据'}{speed !== null ? ` · 约 ${Math.round(speed)} 字符/秒` : ''}</Text>
+      <Text style={styles.statusText}>{label}{elapsed !== null ? ` · ${Math.floor(elapsed)}s` : ''} · {remaining !== null ? `上下文剩余 ${Math.round(remaining)}%` : '上下文暂无数据'} · 缓存命中率 {cacheHitRate}{speed !== null ? ` · 约 ${Math.round(speed)} 字符/秒` : ''}</Text>
     </Pressable>
     <Modal transparent visible={panel !== null} animationType="slide" onRequestClose={() => setPanel(null)}>
       <KeyboardAvoidingView style={styles.overlay} behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined}>
@@ -94,6 +98,8 @@ export function ChatControls({ history, mode, onMode, client, deviceId, disabled
               <Text style={styles.detail}>本轮输入：{metrics?.usage?.inputTokens ?? '暂无数据'} token</Text>
               <Text style={styles.detail}>本轮输出：{metrics?.usage?.outputTokens ?? '暂无数据'} token</Text>
               <Text style={styles.detail}>缓存命中：{metrics?.usage?.cachedInputTokens ?? '暂无数据'} token</Text>
+              <Text style={styles.detail}>缓存命中率：{cacheHitRate}</Text>
+              <Text style={styles.hint}>按本轮缓存输入 token ÷ 本轮总输入 token 计算；没有输入用量时显示暂无数据。</Text>
               <Text style={styles.hint}>未收到可核对的本轮累计用量起点时显示暂无数据。结束后保留最终数值。</Text>
             </>}
             <Button label={panel === 'functions' ? '关闭功能面板' : '关闭指标详情'} subtle onPress={() => setPanel(null)} />

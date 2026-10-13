@@ -34,6 +34,7 @@ import { MarkdownMessage } from './MarkdownMessage';
 import { TurnSettingsPicker } from './TurnSettingsPicker';
 import { Attachments } from './Attachments';
 import { ChatControls } from './ChatControls';
+import { ChatImage, MessageImageContext } from './ChatImage';
 import { findRecentImages, handleRecentImages, resolveRecentImage } from './recent-images';
 import type { RecentImage } from './recent-image-state';
 import {
@@ -93,8 +94,9 @@ function Message({ item }: { item: ChatItem }) {
   const { common } = useUI();
   const styles = useThemedStyles(createStyles);
   if (item.kind === 'command' || item.kind === 'file' || item.kind === 'activity')
-    return <ExecutionItem item={item} />;
-  if (!item.text && !item.attachments?.length) return null;
+    return <><ExecutionItem item={item} />{item.images?.map((image, index) =>
+      <ChatImage key={`${image.source}:${index}`} source={image.source} name={image.name} />)}</>;
+  if (!item.text && !item.attachments?.length && !item.images?.length) return null;
   if (item.kind === 'error')
     return (
       <Text selectable style={[common.error, { marginVertical: 14 }]}>
@@ -103,7 +105,8 @@ function Message({ item }: { item: ChatItem }) {
     );
   return (
     <View
-      style={[styles.message, item.kind === 'user' && styles.userMessage]}
+      style={[styles.message, item.kind === 'user' && styles.userMessage,
+        item.kind === 'user' && !!item.images?.length && styles.imageMessage]}
       testID={item.kind === 'assistant' ? 'assistant-message' : 'user-message'}
     >
       {!!item.text &&
@@ -117,6 +120,7 @@ function Message({ item }: { item: ChatItem }) {
       {!!item.attachments?.length && (
         <Text style={styles.attachedNames}>{item.attachments.join(' · ')}</Text>
       )}
+      {item.images?.map((image, index) => <ChatImage key={`${image.source}:${index}`} source={image.source} name={image.name} />)}
     </View>
   );
 }
@@ -725,9 +729,11 @@ export function Chat({
               })();
             }} />
           </View>}
+          <MessageImageContext.Provider value={{ client, deviceId, threadId: session.id, online }}>
           {history.items.map((item) => (
             <Message key={`${item.turnId}:${item.id}`} item={item} />
           ))}
+          </MessageImageContext.Provider>
           {history.requests.map((request) => (
             <RequestPrompt
               key={request.id}
@@ -764,6 +770,31 @@ export function Chat({
       </ScrollView>
       <View style={[styles.composerOuter, { paddingBottom: Math.max(12, insets.bottom) }]}>
         <View style={styles.chatWidth}>
+          <TurnSettingsPicker
+            client={client}
+            deviceId={deviceId}
+            online={online}
+            value={sessionTurnSettings(history, selectedSettings)}
+            permissions={history.permissions}
+            permissionsUnavailableReason={history.permissionsUnavailableReason}
+            disabled={!draftReady || loading || sending || uploading || running}
+            onChange={(changes) => {
+              const next = { ...latestDraft.current.settings, ...changes };
+              latestDraft.current.settings = next;
+              setSelectedSettings(next);
+              setError('');
+              void persistDraft().catch((error: Error) => {
+                if (alive.current) setError(`会话设置未保存：${error.message}`);
+              });
+            }}
+          />
+          <ChatControls history={history} client={client} deviceId={deviceId} sending={sending}
+            mode={selectedSettings?.mode ?? history.mode ?? 'default'} disabled={!online || !draftReady || sending || uploading}
+            onRefresh={() => void load()}
+            onMode={(mode) => {
+              const next = { ...latestDraft.current.settings, mode };
+              latestDraft.current.settings = next; setSelectedSettings(next);
+            }} />
           <Attachments files={files} uploading={uploading} onRemove={(id) => {
             const removed = latestDraft.current.files.find((file) => file.id === id);
             if (Platform.OS !== 'web' && removed?.previewUri?.startsWith(`${FileSystem.documentDirectory}attachment-previews/`))
@@ -839,31 +870,6 @@ export function Chat({
               )}
             </Pressable>
           </View>
-          <TurnSettingsPicker
-            client={client}
-            deviceId={deviceId}
-            online={online}
-            value={sessionTurnSettings(history, selectedSettings)}
-            permissions={history.permissions}
-            permissionsUnavailableReason={history.permissionsUnavailableReason}
-            disabled={!draftReady || loading || sending || uploading || running}
-            onChange={(changes) => {
-              const next = { ...latestDraft.current.settings, ...changes };
-              latestDraft.current.settings = next;
-              setSelectedSettings(next);
-              setError('');
-              void persistDraft().catch((error: Error) => {
-                if (alive.current) setError(`会话设置未保存：${error.message}`);
-              });
-            }}
-          />
-          <ChatControls history={history} client={client} deviceId={deviceId} sending={sending}
-            mode={selectedSettings?.mode ?? history.mode ?? 'default'} disabled={!online || !draftReady || sending || uploading}
-            onRefresh={() => void load()}
-            onMode={(mode) => {
-              const next = { ...latestDraft.current.settings, mode };
-              latestDraft.current.settings = next; setSelectedSettings(next);
-            }} />
           {!online && (
             <Text style={styles.connectionHint}>
               {clientState.status === 'reconnecting' || clientState.status === 'connecting'
@@ -908,6 +914,7 @@ const createStyles = (palette: Palette) =>
       marginBottom: 18,
     },
     attachedNames: { fontSize: 12, color: palette.muted, marginTop: 9 },
+    imageMessage: { width: '88%', maxWidth: 480 },
     execution: { marginVertical: 5, paddingHorizontal: 10, borderWidth: 1, borderColor: palette.line, borderRadius: 12 },
     executionHeading: { flexDirection: 'row', alignItems: 'center', gap: 9, paddingVertical: 8 },
     executionDot: { width: 4, height: 4, borderRadius: 2, backgroundColor: palette.muted },

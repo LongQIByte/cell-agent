@@ -1,6 +1,6 @@
 import { test, expect, type Page, type WebSocketRoute } from '@playwright/test';
 import { PROTOCOL_VERSION } from '@codex-remote/protocol';
-import type { Device, Model, Project, Session, RecentSession, SessionPermissions } from '@codex-remote/protocol';
+import type { ChatItem, Device, Model, Project, Session, RecentSession, SessionPermissions, RunMetrics } from '@codex-remote/protocol';
 
 test.use({ actionTimeout: 10000 });
 test('new session header, rename, fork, photo previews and Plan/Goal controls preserve drafts at narrow widths', async ({ page }) => {
@@ -60,14 +60,80 @@ test('new session header, rename, fork, photo previews and Plan/Goal controls pr
     const boxes = await Promise.all(['model', 'effort', 'permission'].map((name) => page.getByTestId(`${name}-picker`).boundingBox()));
     expect(Math.max(...boxes.map((box) => box!.y)) - Math.min(...boxes.map((box) => box!.y))).toBeLessThan(1);
     expect(boxes[2]!.x + boxes[2]!.width).toBeLessThanOrEqual(width);
+    const inputBox = (await input.boundingBox())!;
+    for (const box of boxes) expect(box!.y + box!.height).toBeLessThanOrEqual(inputBox.y);
+    const modeBox = (await page.getByRole('button', { name: '功能与模式', exact: true }).boundingBox())!;
+    expect(modeBox.y + modeBox.height).toBeLessThanOrEqual(inputBox.y);
     await expect(page.getByRole('button', { name: '发送消息', exact: true })).toBeVisible();
     await page.screenshot({ path: `artifacts/mobile-issues-${width}.png`, animations: 'disabled' });
   }
   await page.screenshot({ path: 'artifacts/mobile-issues-chat.png', animations: 'disabled' });
 });
+
+test('cache hit rate follows live turn usage and distinguishes zero hits from unavailable input', async ({ page }) => {
+  const fixture = await connectFixture(page);
+  await page.getByRole('button', { name: '打开会话 Native session 1', exact: true }).click();
+  const status = page.getByTestId('run-status');
+  await expect(status).toContainText('缓存命中率 暂无数据');
+  const metrics: RunMetrics = {
+    turnId: 'cache-turn', status: 'generating', startedAt: Date.now(), endedAt: null,
+    firstOutputAt: null, lastOutputAt: null, assistantCharacters: 0, contextUsed: 420, contextWindow: 10000,
+    usage: { inputTokens: 400, cachedInputTokens: 300, outputTokens: 20, reasoningOutputTokens: 0, totalTokens: 420 },
+  };
+  fixture.metrics('native-0', metrics);
+  await expect(status).toContainText('缓存命中率 75%');
+  fixture.metrics('native-1', { ...metrics, usage: null });
+  await expect(status).toContainText('缓存命中率 75%');
+  await status.click();
+  await expect(page.getByText('缓存命中率：75%', { exact: true })).toBeVisible();
+  await expect(page.getByText('缓存命中：300 token', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '关闭指标详情', exact: true }).click();
+  await page.screenshot({ path: 'artifacts/composer-cache-rate-390.png', animations: 'disabled' });
+  for (const [inputTokens, cachedInputTokens, rate] of [[400, 0, '0%'], [3, 1, '33.3%'], [400, 400, '100%'], [0, 0, '暂无数据'], [400, 401, '暂无数据']] as const) {
+    fixture.metrics('native-0', { ...metrics, usage: { ...metrics.usage!, inputTokens, cachedInputTokens } });
+    await expect(status).toContainText(`缓存命中率 ${rate}`);
+  }
+  fixture.metrics('native-0', { ...metrics, turnId: 'next-turn', usage: null });
+  await expect(status).toContainText('缓存命中率 暂无数据');
+});
 const fullPermissions: SessionPermissions = {
   mode: 'full-access', approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' }, approvalsReviewer: 'user', profile: null,
 };
+
+test('local Markdown, tool and sent photos render inside chat, preview, retry and survive reload', async ({ page }) => {
+  const fixture = await connectFixture(page);
+  await page.getByRole('button', { name: '打开会话 Native session 1', exact: true }).click();
+  fixture.imageItem({ id: 'image-reply', turnId: 'image-turn', kind: 'assistant', timestamp: 1000,
+    text: '![回复图片](reply.png)' });
+  const reply = page.getByRole('img', { name: '聊天图片 回复图片', exact: true });
+  await expect(reply).toBeVisible();
+  await expect.poll(() => reply.evaluate((element) => (element as HTMLImageElement).naturalWidth)).toBe(1);
+  expect(fixture.calls.find((call) => call.method === 'images/read')?.params).toEqual({ threadId: 'native-0', source: 'reply.png' });
+  await page.getByRole('button', { name: '预览图片 回复图片', exact: true }).click();
+  await expect(page.getByRole('img', { name: '大图 回复图片', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '关闭图片预览', exact: true }).click();
+  fixture.imageItem({ id: 'tool-image', turnId: 'image-turn', kind: 'activity', text: 'view_image', timestamp: 1000,
+    images: [{ source: 'codex-image:tool', name: '工具图片' }] });
+  await expect(page.getByRole('img', { name: '聊天图片 工具图片', exact: true })).toBeVisible();
+  fixture.imageItem({ id: 'sent-image', turnId: 'image-turn', kind: 'user', text: '', timestamp: 1000,
+    attachments: ['photo.png'], images: [{ source: '/workspace/photo.png', name: 'photo.png' }] });
+  await expect(page.getByRole('img', { name: '聊天图片 photo.png', exact: true })).toBeVisible();
+  await page.reload();
+  await expect(reply).toBeVisible();
+  await expect(page.getByRole('img', { name: '聊天图片 photo.png', exact: true })).toBeVisible();
+  fixture.imageItem({ id: 'missing-image', turnId: 'image-turn', kind: 'assistant', text: '![缺失图片](missing.png)', timestamp: 1000 });
+  await page.getByRole('button', { name: '重试图片 缺失图片', exact: true }).click();
+  await expect.poll(() => fixture.calls.filter((call) => call.method === 'images/read' && call.params.source === 'missing.png').length).toBe(2);
+  for (const width of [320, 390, 820]) {
+    await page.setViewportSize({ width, height: 844 });
+    const box = (await reply.boundingBox())!;
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(width);
+    expect((await page.getByRole('img', { name: '聊天图片 photo.png', exact: true }).boundingBox())!.width).toBeGreaterThan(160);
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: 'artifacts/chat-images-390.png', animations: 'disabled' });
+});
 const approvalPermissions: SessionPermissions = {
   mode: 'approval', approvalPolicy: 'on-request',
   sandboxPolicy: { type: 'workspaceWrite', writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false },
@@ -137,6 +203,7 @@ async function connectFixture(page: Page, large = false) {
   const settingsByThread = new Map<string, { model: string; reasoningEffort: string; permissions: SessionPermissions }>();
   const modes = new Map<string, string>();
   const goals = new Map<string, any>();
+  const imageItems: ChatItem[] = [];
   await page.routeWebSocket('**/ws', (socket) => {
     sockets.push(socket);
     socket.onMessage((raw) => {
@@ -167,7 +234,7 @@ async function connectFixture(page: Page, large = false) {
           const selected = [...projects.flatMap((p) => p.sessions), ...recentSessions.map((entry) => entry.session)].find((item) => item.id === message.params.threadId)!;
           const settings = settingsByThread.get(message.params.threadId) ?? { model: 'model-a', reasoningEffort: 'medium', permissions: fullPermissions };
           result = { session: selected, ...settings, mode: modes.get(selected.id) ?? 'default', goal: goals.get(selected.id) ?? null,
-            capabilities: { plan: true, goal: true, goalBudget: true }, items: [{ id: 'markdown', turnId: 'fixture-turn', kind: 'assistant', text: markdown, timestamp: 1000 }], nextCursor: null, activeTurnId: null, requests: [], sequence };
+            capabilities: { plan: true, goal: true, goalBudget: true }, items: [{ id: 'markdown', turnId: 'fixture-turn', kind: 'assistant', text: markdown, timestamp: 1000 }, ...imageItems], nextCursor: null, activeTurnId: null, requests: [], sequence };
           break;
         }
         case 'sessions/send':
@@ -203,6 +270,13 @@ async function connectFixture(page: Page, large = false) {
         }
         case 'sessions/goal/clear': goals.delete(message.params.threadId); result = { goal: null }; break;
         case 'attachments/upload': result = { file: { id: `file-${calls.length}`, name: message.params.name, mimeType: message.params.mimeType, size: 64 } }; break;
+        case 'images/read':
+          if (message.params.source === 'missing.png') {
+            socket.send(JSON.stringify({ type: 'response', id: message.id, error: { code: 'IMAGE_MISSING', message: '电脑上的图片不存在' } }));
+            return;
+          }
+          result = { mimeType: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==' };
+          break;
         case 'sessions/archive': archives.add(`${message.deviceId}:${message.params.threadId}`); result = {}; break;
         case 'sessions/unarchive': archives.delete(`${message.deviceId}:${message.params.threadId}`); result = {}; break;
         case 'directories/list': result = { path: message.params.path || '/', parent: null, directories: [{ name: 'workspace', path: '/workspace' }] }; break;
@@ -218,6 +292,14 @@ async function connectFixture(page: Page, large = false) {
   await page.goto('/');
   await expect(page.getByRole('button', { name: '项目 Native Group，Mac 00', exact: true })).toBeVisible();
   return { calls, projects, recentSessions, sockets,
+    imageItem: (item: ChatItem) => {
+      imageItems.push(item);
+      sockets.at(-1)!.send(JSON.stringify({ type: 'event', method: 'session/item', deviceId: devices[0].id,
+        params: { threadId: 'native-0', item, sequence: ++sequence } }));
+    },
+    metrics: (threadId: string, metrics: RunMetrics) => sockets.at(-1)!.send(JSON.stringify({
+      type: 'event', method: 'session/metrics', deviceId: devices[0].id, params: { threadId, metrics, sequence: ++sequence },
+    })),
     delayDirectories: () => { deferDirectories = true; },
     deliverDirectory: () => { deferDirectories = false; pendingDirectory?.(); },
     changed: () => sockets.at(-1)!.send(JSON.stringify({ type: 'event', method: 'catalog/changed', params: {} })) };

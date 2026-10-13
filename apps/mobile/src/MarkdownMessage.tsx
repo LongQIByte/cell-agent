@@ -12,8 +12,12 @@ import {
 } from 'react-native';
 import { Renderer, useMarkdown, type MarkedStyles } from 'react-native-marked';
 import { scaleTextStyles, useThemedStyles, useUI, type Palette } from './ui';
+import { ChatImage } from './ChatImage';
 
 class ChatMarkdownRenderer extends Renderer {
+  image(uri: string, alt?: string): ReactNode {
+    return <ChatImage key={this.getKey()} source={uri} name={alt || '图片'} />;
+  }
   constructor(private readonly styles: ReturnType<typeof createStyles>) {
     super({ selectable: true });
   }

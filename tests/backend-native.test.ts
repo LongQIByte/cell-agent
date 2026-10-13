@@ -8,7 +8,8 @@ import { RemoteError, type ApprovalPolicy, type Model, type Project, type Recent
 import { AgentService } from '../apps/agent/src/service.js';
 import { AgentStore } from '../apps/agent/src/store.js';
 import type { CodexRpc } from '../apps/agent/src/codex.js';
-import { sessionFrom } from '../apps/agent/src/normalize.js';
+import { normalizeItem, sessionFrom } from '../apps/agent/src/normalize.js';
+import { markdownImageSources } from '../apps/agent/src/message-images.js';
 
 interface ThreadFixture {
   id: string;
@@ -56,6 +57,47 @@ test('rename and fork use native metadata; Plan and Goal lifecycle recover canon
 });
 const thread = (id: string, cwd: string, projectId: string | null, updatedAt = 1): ThreadFixture => ({
   id, cwd, projectId, name: id, updatedAt, createdAt: 1, model: 'model-a', reasoningEffort: 'low',
+});
+
+test('chat images survive history reload and tool completion, with reads limited to referenced images in that thread', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'cell-agent-images-')));
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==', 'base64');
+  await writeFile(join(root, 'photo.png'), png);
+  await writeFile(join(root, 'secret.txt'), 'not an image');
+  const native = new NativeCodex();
+  native.threads = [thread('one', root, null), thread('two', root, null)];
+  const call = native.call.bind(native);
+  native.call = async (method, params) => method === 'thread/turns/list' ? {
+    data: params.threadId === 'one' ? [{ id: 'image-turn', status: 'completed', items: [
+      { type: 'userMessage', id: 'photo', content: [{ type: 'localImage', path: join(root, 'photo.png') }] },
+      { type: 'agentMessage', id: 'markdown', text: '![照片](photo.png)\n![无效](secret.txt)' },
+      { type: 'imageGeneration', id: 'generated', status: 'completed', result: png.toString('base64') },
+    ] }] : [], nextCursor: null,
+  } : call(method, params);
+  let service = new AgentService(native as unknown as CodexRpc, new AgentStore(':memory:'), 'machine', root);
+  try {
+    const history = await service.readSession('one');
+    assert.equal(history.items[0].images?.[0].source, join(root, 'photo.png'));
+    const generated = history.items.find((item) => item.id === 'generated')!.images![0].source;
+    assert.ok(generated.startsWith('codex-image:'));
+    assert.ok(!JSON.stringify(history).includes(png.toString('base64')));
+    for (const source of [join(root, 'photo.png'), 'photo.png', generated]) {
+      assert.deepEqual(await service.handle('images/read', { threadId: 'one', source }), { mimeType: 'image/png', data: png.toString('base64') });
+    }
+    await assert.rejects(service.handle('images/read', { threadId: 'two', source: join(root, 'photo.png') }), /图片不属于此会话/);
+    await assert.rejects(service.handle('images/read', { threadId: 'one', source: join(root, 'secret.txt') }), /图片不属于此会话/);
+    await assert.rejects(service.handle('images/read', { threadId: 'one', source: 'secret.txt' }), /图片格式不支持/);
+    native.emit('notification', { method: 'item/completed', params: { threadId: 'one', turnId: 'live-turn', item: {
+      type: 'dynamicToolCall', id: 'tool', tool: 'view_image', contentItems: [{ type: 'image', imageUrl: `data:image/png;base64,${png.toString('base64')}` }],
+    } } });
+    const tool = (await service.readSession('one')).items.find((item) => item.id === 'tool')!;
+    assert.equal((await service.handle('images/read', { threadId: 'one', source: tool.images![0].source }) as any).data, png.toString('base64'));
+    service.close();
+    service = new AgentService(native as unknown as CodexRpc, new AgentStore(':memory:'), 'machine', root);
+    assert.equal((await service.handle('images/read', { threadId: 'one', source: generated }) as any).mimeType, 'image/png');
+    assert.equal(normalizeItem({ type: 'mcpToolCall', id: 'mcp', result: { content: [{ type: 'image', mimeType: 'image/png', data: png.toString('base64') }] } }, 'turn')!.images!.length, 1);
+    assert.deepEqual(markdownImageSources('![space](<photo with space.png>)\n```\n![example](secret.png)\n```'), ['photo with space.png']);
+  } finally { service.close(); await rm(root, { recursive: true, force: true }); }
 });
 test('a goal notification arriving during a read cannot be overwritten by that older RPC snapshot', async () => {
   const native = new NativeCodex(); native.threads = [thread('one', '/workspace', null)];

@@ -25,6 +25,7 @@ import { sessionFrom, normalizeItem, mergeItems } from './normalize.js';
 import { readDesktopMembership, desktopSession } from './desktop-membership.js';
 import { settingsFromNotification, settingsFromResume, permissionPreset, type SessionSettings } from './session-settings.js';
 import { assistantOutput, beginMetrics, updateTokenUsage, type MetricsSnapshot } from './run-metrics.js';
+import { imageMime, imagePath, markdownImageSources } from './message-images.js';
 
 interface Catalogue {
   projects: Project[];
@@ -42,6 +43,7 @@ export class AgentService extends EventEmitter {
   private closed = false;
   private active = new Map<string, string>();
   private runtime = new Map<string, ChatItem[]>();
+  private imageSources = new Map<string, Map<string, string>>();
   private settings = new Map<string, SessionSettings>();
   private sending = new Set<string>();
   private metrics = new Map<string, MetricsSnapshot>();
@@ -97,13 +99,24 @@ export class AgentService extends EventEmitter {
   private publish(method: string, params: JsonRecord) {
     this.emit('event', { type: 'event', method, params: { ...params, sequence: ++this.sequence } });
   }
-  private normalize(item: any, turnId: string, timestamp = Date.now()) {
-    return normalizeItem(
+  private normalize(item: any, turnId: string, timestamp = Date.now(), threadId?: string) {
+    const normalized = normalizeItem(
       item,
       turnId,
       timestamp,
       (path) => this.store.attachmentByPath(path)?.name,
     );
+    if (normalized && threadId) {
+      const sources = this.imageSources.get(threadId) ?? new Map<string, string>();
+      normalized.images = normalized.images?.map((image, index) => {
+        const source = image.source.startsWith('data:') ? `codex-image:${turnId}:${item.id}:${index}` : image.source;
+        sources.set(source, image.source);
+        return { ...image, source };
+      });
+      for (const source of markdownImageSources(normalized.text)) sources.set(source, source);
+      this.imageSources.set(threadId, sources);
+    }
+    return normalized;
   }
   private upsert(threadId: string, item: ChatItem) {
     const items = mergeItems(this.runtime.get(threadId) ?? [], [item]);
@@ -232,7 +245,7 @@ export class AgentService extends EventEmitter {
       });
       this.publish('catalog/changed', {});
     } else if (method === 'item/started' || method === 'item/completed') {
-      const item = this.normalize(params.item, params.turnId);
+      const item = this.normalize(params.item, params.turnId, Date.now(), threadId);
       if (item) item.status ??= method === 'item/started' ? 'inProgress' : 'completed';
       if (item) this.upsert(threadId, item);
       const snapshot = this.metricSnapshot(threadId);
@@ -530,7 +543,7 @@ export class AgentService extends EventEmitter {
       items.push(
         ...((turn.items ?? [])
           .map((item: any) =>
-            this.normalize(item, turn.id, (turn.startedAt ?? thread.createdAt) * 1000),
+            this.normalize(item, turn.id, (turn.startedAt ?? thread.createdAt) * 1000, threadId),
           )
           .filter(Boolean) as ChatItem[]),
       );
@@ -583,6 +596,50 @@ export class AgentService extends EventEmitter {
   }
   async handle(method: string, raw: JsonRecord): Promise<unknown> {
     await this.codex.ready;
+    if (method === 'images/read') {
+      const p = z.object({ threadId: idSchema, source: z.string().min(1).max(8192) }).parse(raw);
+      const { thread } = await this.codex.call('thread/read', { threadId: p.threadId });
+      await this.localSession(thread);
+      let source = this.imageSources.get(p.threadId)?.get(p.source);
+      // A streamed Markdown image may be displayed before item/completed.
+      if (!source && (this.runtime.get(p.threadId) ?? []).some((item) =>
+        item.kind === 'assistant' && markdownImageSources(item.text).includes(p.source))) source = p.source;
+      if (!source) {
+        await this.readSession(p.threadId);
+        source = this.imageSources.get(p.threadId)?.get(p.source);
+      }
+      if (!source) throw new RemoteError('IMAGE_NOT_IN_SESSION', '图片不属于此会话');
+      let data: Buffer;
+      if (source.startsWith('data:')) {
+        const match = /^data:image\/(?:png|jpeg|webp|gif);base64,([A-Za-z0-9+/]*={0,2})$/.exec(source);
+        if (!match) throw new RemoteError('INVALID_IMAGE', '图片格式不支持');
+        if (match[1].length > Math.ceil(MAX_FILE_BYTES / 3) * 4) throw new RemoteError('FILE_TOO_LARGE', '图片不能超过 8 MB');
+        data = Buffer.from(match[1], 'base64');
+      } else {
+        if (/^[a-z][a-z0-9+.-]*:/i.test(source) && !/^(?:file:|sandbox:|[a-z]:[\\/])/i.test(source))
+          throw new RemoteError('INVALID_IMAGE', '图片来源不支持');
+        const path = await realpath(imagePath(source, thread.cwd)).catch(() => {
+          throw new RemoteError('IMAGE_MISSING', '电脑上的图片不存在');
+        });
+        const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+        try {
+          const info = await handle.stat();
+          if (!info.isFile()) throw new RemoteError('INVALID_IMAGE', '图片不是文件');
+          if (info.size > MAX_FILE_BYTES) throw new RemoteError('FILE_TOO_LARGE', '图片不能超过 8 MB');
+          const buffer = Buffer.alloc(info.size);
+          let offset = 0;
+          while (offset < buffer.length) {
+            const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
+            if (!bytesRead) break;
+            offset += bytesRead;
+          }
+          data = buffer.subarray(0, offset);
+        } finally { await handle.close(); }
+      }
+      const mimeType = imageMime(data);
+      if (!mimeType) throw new RemoteError('INVALID_IMAGE', '图片格式不支持');
+      return { mimeType, data: data.toString('base64') };
+    }
     if (method === 'projects/list') {
       const { archived } = z.object({ archived: z.boolean().default(false) }).parse(raw);
       return this.catalogue(archived);

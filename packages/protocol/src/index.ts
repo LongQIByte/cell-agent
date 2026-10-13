@@ -80,6 +80,7 @@ export interface ChatItem {
   status?: string;
   timestamp: number;
   attachments?: string[];
+  images?: { source: string; name: string }[];
   clientId?: string;
 }
 export interface CodexRequest {

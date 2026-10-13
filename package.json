@@ -13,6 +13,7 @@
   "scripts": {
     "start": "node scripts/lan.mjs",
     "dev": "node scripts/lan.mjs --dev",
+    "dev:ui": "node scripts/mobile-dev.mjs",
     "agent": "node --import tsx apps/agent/src/index.ts",
     "relay": "node --import tsx apps/relay/src/index.ts",
     "web:build": "npm run export:web --workspace @codex-remote/mobile",

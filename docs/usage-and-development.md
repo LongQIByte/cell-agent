@@ -116,6 +116,8 @@ npm run dev
 
 输出 `artifacts/codex-remote-dev.apk`（ARM64），手机与电脑连接同一 Wi-Fi，在手机浏览器打开终端显示的 Development APK 地址下载、安装。开发版名称为 **Codex Remote Dev**，可与正式版共存。打开开发版，在 Expo launcher 输入终端显示的 Metro 地址 `http://电脑IP:8081`，或扫描终端二维码 / `.local/dev-client.png`。进入 Settings 后使用原有服务地址和配对密钥连接电脑。
 
+如果 Windows 后端已经在运行，只开发手机界面时运行 `npm run dev:ui`。此命令只启动 Metro，手机继续连接已有的 Windows 服务和会话。端口被其他应用占用时，可在 WSL 设置 `METRO_PORT=18081 npm run dev:ui`。通过 USB 使用 `adb reverse tcp:18081 tcp:18081` 后，在 Dev launcher 填写 `http://127.0.0.1:18081`；Windows ADB 需要能访问该端口，WSL 的 Metro 需另外转发到 Windows。界面修改可 Fast Refresh，Agent 的接口修改仍需更新并重启后端。
+
 手机已通过 USB 连接并允许 USB 调试时，在另一个终端运行：
 
 ```bash

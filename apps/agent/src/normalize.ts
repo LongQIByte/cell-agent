@@ -1,5 +1,6 @@
 import { basename } from 'node:path';
 import { RemoteError, type ChatItem, type Session } from '@codex-remote/protocol';
+import { itemImages } from './message-images.js';
 export function sessionFrom(thread: any): Session {
   if (thread.projectId !== null && typeof thread.projectId !== 'string')
     throw new RemoteError(
@@ -26,7 +27,8 @@ export function normalizeItem(
   timestamp = Date.now(),
   attachmentName: (path: string) => string | undefined = () => undefined,
 ): ChatItem | null {
-  const base = { id: item.id, turnId, timestamp, status: item.status };
+  const images = itemImages(item);
+  const base = { id: item.id, turnId, timestamp, status: item.status, ...(images.length ? { images } : {}) };
   switch (item.type) {
     case 'userMessage': {
       const texts: string[] = [];
@@ -117,6 +119,8 @@ export function normalizeItem(
       return { ...base, kind: 'activity', text: item.review ?? '代码审查完成' };
     case 'imageView':
       return { ...base, kind: 'activity', text: `查看图片 · ${basename(item.path ?? '')}` };
+    case 'imageGeneration':
+      return { ...base, kind: 'assistant', text: item.status === 'inProgress' ? '正在生成图片…' : '生成的图片' };
     default:
       return null;
   }
