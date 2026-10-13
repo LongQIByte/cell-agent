@@ -75,7 +75,7 @@ test('system/light/dark theme persists and all four font sizes reach pages, mess
     await general.getByRole('radio', { name: `字体大小：${label}`, exact: true }).click();
     await fontSize(general.getByTestId('font-preview'), 16 * scale);
     await page.getByRole('tab', { name: 'Projects', exact: true }).click();
-    await fontSize(page.getByRole('heading', { name: 'Projects', exact: true }), 34 * scale);
+    await fontSize(page.getByRole('heading', { name: 'Projects', exact: true }), 28 * scale);
     await expect(page.getByTestId('projects-screen')).toHaveCSS('background-color', 'rgb(18, 18, 18)');
     await openChat(page);
     await fontSize(page.getByRole('heading', { name: 'Theme heading', exact: true }), 26 * scale);

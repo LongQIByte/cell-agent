@@ -389,6 +389,23 @@ function Main() {
       }
     }
   }
+  async function renameSession(entry: RecentSession, name: string) {
+    if (!client) throw new Error('请先连接电脑');
+    await client.request('sessions/rename', { threadId: entry.session.id, name }, entry.deviceId);
+    const replace = (session: Session) => session.id === entry.session.id ? { ...session, name } : session;
+    setProjects((previous) => previous.map((project) => project.deviceId === entry.deviceId ? { ...project, sessions: project.sessions.map(replace) } : project));
+    setRecentSessions((previous) => previous.map((item) => item.deviceId === entry.deviceId ? { ...item, session: replace(item.session) } : item));
+    if (selected?.deviceId === entry.deviceId && selected.session.id === entry.session.id)
+      setSelected({ ...selected, session: replace(selected.session) });
+    void currentRefresh.current();
+  }
+  async function forkSession(entry: RecentSession) {
+    if (!client) throw new Error('请先连接电脑');
+    const { session } = await client.request<{ session: Session }>('sessions/fork', { threadId: entry.session.id }, entry.deviceId);
+    openSelection({ deviceId: entry.deviceId, session,
+      project: projects.find((project) => project.deviceId === entry.deviceId && project.id === session.projectId) ?? null });
+    void currentRefresh.current();
+  }
   async function archiveSession(deviceId: string, session: Session, restore = false) {
     if (!client || archivingId) return;
     const target = client;
@@ -440,6 +457,8 @@ function Main() {
               onArchive={archive}
               onArchiveSession={(deviceId, session) => void archiveSession(deviceId, session)}
               onRestoreSession={(deviceId, session) => void archiveSession(deviceId, session, true)}
+              onRenameSession={renameSession}
+              onForkSession={forkSession}
               onSettings={() => setTab('settings')}
               onCreateProject={() => {
                 if (!client || !state.devices.some((d) => d.online)) setTab('settings');
@@ -474,6 +493,8 @@ function Main() {
                 client={client}
                 clientState={state}
                 server={connection?.server ?? ''}
+                onOpenSource={(session) => openSelection({ deviceId: selected.deviceId, session,
+                  project: projects.find((project) => project.deviceId === selected.deviceId && project.id === session.projectId) ?? null })}
               />
             </View>
           ) : tab === 'settings' ? (

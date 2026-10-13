@@ -3,6 +3,7 @@ import type { Model, PermissionMode, SessionHistory, SessionPermissions } from '
 // Only explicit edits are stored. Changing a model must not restore an older
 // permission policy over a newer policy selected on the computer.
 export interface TurnOverrides {
+  mode?: 'default' | 'plan';
   model?: string;
   effort?: string | null;
   permissionMode?: PermissionMode;
@@ -43,6 +44,7 @@ export function turnSettingsParams(history: SessionHistory, pending: TurnOverrid
     ...(selected.model ? { model: selected.model } : {}),
     ...(selected.effort ? { effort: selected.effort } : {}),
     ...(pending?.permissionMode ? { permissionMode: pending.permissionMode } : {}),
+    ...(pending?.mode ? { mode: pending.mode } : {}),
   };
 }
 
@@ -51,6 +53,7 @@ export function sameTurnOverrides(a: TurnOverrides | null, b: TurnOverrides | nu
     a?.model === b?.model &&
     a?.effort === b?.effort &&
     a?.permissionMode === b?.permissionMode
+    && a?.mode === b?.mode
   );
 }
 

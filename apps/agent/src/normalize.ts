@@ -13,6 +13,7 @@ export function sessionFrom(thread: any): Session {
     name: thread.name || thread.preview?.replace(/\s+/g, ' ').slice(0, 60) || '新会话',
     updatedAt: (thread.updatedAt ?? thread.createdAt) * 1000,
     status: thread.status?.type ?? 'notLoaded',
+    ...(thread.forkedFromId ? { forkedFromId: thread.forkedFromId } : {}),
   };
 }
 function printable(value: unknown): string {

@@ -64,7 +64,7 @@ test('search finds both recent and project conversations and leaves saved collap
   assert.equal(projectSections([one], recent, 'no match', collapsed, new Set(), 'active', new Set()).length, 0);
 });
 
-test('pinned conversations lead their own list before the five-session limit without changing other groups', () => {
+test('pins from every project and recent list share one top section, even when projects are collapsed', () => {
   const mac = project('same', 8);
   const other = project('same', 8, 'other');
   const recent = [
@@ -73,9 +73,14 @@ test('pinned conversations lead their own list before the five-session limit wit
   ];
   const pins = normalizeSessionPins(['mac:same-6', 'mac:same-7', 'mac:recent-old', null, 5, '']);
   const sections = projectSections([mac, other], recent, '', new Set(), new Set(), 'active', pins);
-  assert.deepEqual(sections[0].data.map((entry) => entry.session.id), ['same-6', 'same-7', 'same-0', 'same-1', 'same-2']);
-  assert.deepEqual(sections[1].data.map((entry) => entry.session.id), other.sessions.slice(0, 5).map((entry) => entry.id));
-  assert.deepEqual(sections[2].data.map((entry) => entry.session.id), ['recent-old', 'recent-new']);
+  assert.equal(sections[0].pinned, true);
+  assert.deepEqual(sections[0].data.map((entry) => entry.session.id), ['same-6', 'recent-old', 'same-7']);
+  assert.deepEqual(sections[1].data.map((entry) => entry.session.id), mac.sessions.slice(0, 5).map((entry) => entry.id));
+  assert.deepEqual(sections[2].data.map((entry) => entry.session.id), other.sessions.slice(0, 5).map((entry) => entry.id));
+  assert.deepEqual(sections[3].data.map((entry) => entry.session.id), ['recent-new']);
+  const collapsedPins = projectSections([mac, other], recent, '', new Set(['active:mac:same']), new Set(), 'active', pins);
+  assert.deepEqual(collapsedPins[0].data, sections[0].data);
+  assert.equal(collapsedPins[1].data.length, 0);
   assert.deepEqual(mac.sessions.map((entry) => entry.id), Array.from({ length: 8 }, (_, index) => `same-${index}`));
   assert.deepEqual([...pins], ['mac:same-6', 'mac:same-7', 'mac:recent-old']);
   const unpinned = projectSections([mac], [], '', new Set(), new Set(), 'active', new Set());

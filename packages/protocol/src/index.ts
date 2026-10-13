@@ -18,6 +18,7 @@ export interface Session {
   name: string;
   updatedAt: number;
   status: string;
+  forkedFromId?: string | null;
 }
 export interface RecentSession {
   deviceId: string;
@@ -98,12 +99,53 @@ export interface SessionHistory {
   activeTurnId: string | null;
   requests: CodexRequest[];
   sequence: number;
+  mode?: 'default' | 'plan';
+  goal?: SessionGoal | null;
+  capabilities?: SessionCapabilities;
+  metrics?: RunMetrics | null;
+}
+export interface SessionGoal {
+  threadId: string;
+  objective: string;
+  status: 'active' | 'paused' | 'blocked' | 'usageLimited' | 'budgetLimited' | 'complete';
+  tokenBudget: number | null;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  createdAt: number;
+  updatedAt: number;
+}
+export interface SessionCapabilities {
+  plan: boolean;
+  goal: boolean;
+  goalBudget: boolean;
+  planReason?: string;
+  goalReason?: string;
+}
+export interface TokenUsage {
+  totalTokens: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+}
+export interface RunMetrics {
+  turnId: string;
+  status: 'waiting' | 'generating' | 'tool' | 'confirmation' | 'completed' | 'stopped' | 'failed';
+  startedAt: number;
+  endedAt: number | null;
+  firstOutputAt: number | null;
+  lastOutputAt: number | null;
+  assistantCharacters: number;
+  contextUsed: number | null;
+  contextWindow: number | null;
+  usage: TokenUsage | null;
 }
 export interface UploadedFile {
   id: string;
   name: string;
   mimeType: string;
   size: number;
+  previewUri?: string;
 }
 export interface RpcError {
   code: string;

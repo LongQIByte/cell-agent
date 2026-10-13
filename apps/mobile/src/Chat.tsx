@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   AppState,
+  Modal,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -31,6 +32,10 @@ import { Icon } from './icons';
 import { Button, useUI, useThemedStyles, type Palette } from './ui';
 import { MarkdownMessage } from './MarkdownMessage';
 import { TurnSettingsPicker } from './TurnSettingsPicker';
+import { Attachments } from './Attachments';
+import { ChatControls } from './ChatControls';
+import { findRecentImages, handleRecentImages, resolveRecentImage } from './recent-images';
+import type { RecentImage } from './recent-image-state';
 import {
   sameTurnOverrides,
   sessionTurnSettings,
@@ -62,7 +67,7 @@ function ExecutionItem({ item }: { item: ChatItem }) {
           ]}
           numberOfLines={expanded ? undefined : 2}
         >
-          {item.text || '执行中…'}
+          {item.kind === 'activity' && /思考/.test(item.text) ? `${item.status === 'inProgress' ? '思考中' : '思考完成'}${item.text === '正在思考…' ? '' : ` · ${item.text}`}` : item.text || '执行中…'}
         </Text>
         <View style={{ transform: [{ rotate: expanded ? '180deg' : '0deg' }] }}>
           <Icon name="chevron" size={13} color={palette.muted} />
@@ -234,6 +239,7 @@ export function Chat({
   client,
   clientState,
   server,
+  onOpenSource,
 }: {
   project: Project | null;
   deviceId: string;
@@ -241,6 +247,7 @@ export function Chat({
   client: RemoteClient | null;
   clientState: ClientState;
   server: string;
+  onOpenSource: (session: Session) => void;
 }) {
   const { palette, common, scheme } = useUI();
   const styles = useThemedStyles(createStyles);
@@ -267,11 +274,34 @@ export function Chat({
   const [sending, setSending] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const [recent, setRecent] = useState<RecentImage[]>([]);
+  const attachmentBusy = useRef(false);
+  const online = clientState.status === 'connected' && clientState.devices.some((d) => d.id === deviceId && d.online);
   const attempt = useRef<SessionDraft['attempt']>(null);
   const latestDraft = useRef<SessionDraft>({ text: '', files: [], settings: null, attempt: null });
   const draftLoaded = useRef(false);
   const draftTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   latestDraft.current = { text, files, settings: selectedSettings, attempt: attempt.current };
+  useEffect(() => {
+    if (!draftReady || !online || Platform.OS === 'web') return;
+    let checking = false;
+    let cancelled = false;
+    const check = async () => {
+      if (checking || attachmentBusy.current) return;
+      checking = true;
+      try {
+        const images = await findRecentImages();
+        const added = images.filter((image) => latestDraft.current.files.some((file) => file.name === image.filename));
+        if (added.length) await handleRecentImages(added);
+        if (!cancelled) setRecent(images.filter((image) => !added.includes(image)));
+      }
+      catch { /* Missing/limited permission leaves manual attachment selection available. */ }
+      finally { checking = false; }
+    };
+    void check();
+    const subscription = AppState.addEventListener('change', (state) => { if (state === 'active') void check(); });
+    return () => { cancelled = true; subscription.remove(); };
+  }, [draftReady, online, session.id]);
   const loadingRef = useRef(false);
   const buffered = useRef<any[]>([]);
   const alive = useRef(true);
@@ -280,9 +310,6 @@ export function Chat({
   const prepending = useRef<{ y: number; height: number } | null>(null);
   const cacheKey = `session:${server}:${deviceId}:${session.id}`;
   const draftKey = `draft:${server}:${deviceId}:${session.id}`;
-  const online =
-    clientState.status === 'connected' &&
-    clientState.devices.some((d) => d.id === deviceId && d.online);
   const persistDraft = useCallback(() => {
     clearTimeout(draftTimer.current);
     const draft = latestDraft.current;
@@ -460,7 +487,8 @@ export function Chat({
     }
   }
   async function pick() {
-    if (!client || !draftReady || uploading) return;
+    if (!client || !draftReady || uploading || attachmentBusy.current) return;
+    attachmentBusy.current = true;
     setError('');
     setUploading(true);
     try {
@@ -469,8 +497,19 @@ export function Chat({
         copyToCacheDirectory: true,
       });
       if (result.canceled) return;
-      if (files.length + result.assets.length > 6) throw new Error('一次最多添加 6 个附件');
-      for (const asset of result.assets) {
+      await uploadAssets(result.assets);
+    } catch (e) {
+      if (alive.current) setError((e as Error).message);
+    } finally {
+      attachmentBusy.current = false;
+      if (alive.current) setUploading(false);
+    }
+  }
+  async function uploadAssets(assets: { uri: string; name: string; size?: number; mimeType?: string; file?: File }[], onUploaded?: (index: number) => Promise<void>) {
+    if (!client) return;
+    if (latestDraft.current.files.length + assets.length > 6) throw new Error('一次最多添加 6 个附件');
+    for (const [index, asset] of assets.entries()) {
+        const mimeType = asset.mimeType ?? (/\.png$/i.test(asset.name) ? 'image/png' : /\.jpe?g$/i.test(asset.name) ? 'image/jpeg' : /\.webp$/i.test(asset.name) ? 'image/webp' : 'application/octet-stream');
         if ((asset.size ?? 0) > MAX_FILE_BYTES) throw new Error(`${asset.name} 超过 8 MB`);
         let data: string;
         if (Platform.OS === 'web' && asset.file)
@@ -491,22 +530,53 @@ export function Chat({
           {
             threadId: session.id,
             name: asset.name,
-            mimeType: asset.mimeType ?? 'application/octet-stream',
+            mimeType,
             data,
           },
           deviceId,
         );
         if (alive.current) {
-          const next = [...latestDraft.current.files, uploaded.file];
+          let previewUri: string | undefined;
+          if (/^image\/(png|jpeg|webp|gif)$/.test(mimeType)) {
+            if (Platform.OS === 'web') {
+              previewUri = `data:${mimeType};base64,${data}`;
+              if (data.length > 200000) {
+                const image = new window.Image();
+                const loaded = new Promise<void>((resolve, reject) => { image.onload = () => resolve(); image.onerror = () => reject(new Error('无法生成照片预览')); });
+                image.src = previewUri; await loaded;
+                const canvas = document.createElement('canvas');
+                const scale = Math.min(1, 1024 / Math.max(image.width, image.height));
+                canvas.width = Math.max(1, Math.round(image.width * scale));
+                canvas.height = Math.max(1, Math.round(image.height * scale));
+                canvas.getContext('2d')!.drawImage(image, 0, 0, canvas.width, canvas.height);
+                previewUri = canvas.toDataURL('image/jpeg', 0.7);
+              }
+            } else if (FileSystem.documentDirectory) {
+              const directory = `${FileSystem.documentDirectory}attachment-previews/`;
+              await FileSystem.makeDirectoryAsync(directory, { intermediates: true });
+              previewUri = `${directory}${uploaded.file.id}-${asset.name.replace(/[^\w.-]/g, '_')}`;
+              await FileSystem.copyAsync({ from: asset.uri, to: previewUri });
+            }
+          }
+          const next = [...latestDraft.current.files, { ...uploaded.file,
+            ...(previewUri ? { previewUri } : {}) }];
           latestDraft.current.files = next;
           setFiles(next);
+          await persistDraft();
+          await onUploaded?.(index);
         }
       }
-    } catch (e) {
-      if (alive.current) setError((e as Error).message);
-    } finally {
-      if (alive.current) setUploading(false);
-    }
+  }
+  async function addRecent() {
+    if (!client || uploading || sending || !draftReady || attachmentBusy.current) return;
+    attachmentBusy.current = true;
+    setUploading(true); setError('');
+    try {
+      const assets = await Promise.all(recent.map(resolveRecentImage));
+      await uploadAssets(assets, async (index) => { await handleRecentImages([recent[index]]); });
+      setRecent([]);
+    } catch (e) { if (alive.current) setError((e as Error).message); }
+    finally { attachmentBusy.current = false; if (alive.current) setUploading(false); }
   }
   async function send() {
     if (
@@ -642,6 +712,19 @@ export function Chat({
               <Text style={styles.emptyHint}>继续思考，开始创造。</Text>
             </View>
           )}
+          {!!history.session.forkedFromId && <View>
+            <Text style={styles.connectionHint}>分支会话 · 来源 {history.session.forkedFromId}</Text>
+            <Button label="打开来源会话" subtle disabled={!online || loading || sending} style={{ minHeight: 36, paddingVertical: 6 }} onPress={() => {
+              if (!client) return;
+              void (async () => {
+                try {
+                  await persistDraft();
+                  const source = await client.request<SessionHistory>('sessions/read', { threadId: history.session.forkedFromId }, deviceId);
+                  if (alive.current) onOpenSource(source.session);
+                } catch (e) { if (alive.current) setError((e as Error).message); }
+              })();
+            }} />
+          </View>}
           {history.items.map((item) => (
             <Message key={`${item.turnId}:${item.id}`} item={item} />
           ))}
@@ -681,30 +764,13 @@ export function Chat({
       </ScrollView>
       <View style={[styles.composerOuter, { paddingBottom: Math.max(12, insets.bottom) }]}>
         <View style={styles.chatWidth}>
-          {(files.length > 0 || uploading) && (
-            <View style={styles.attachments}>
-              {files.map((file) => (
-                <View key={file.id} style={styles.fileChip}>
-                  <Text style={styles.fileName} numberOfLines={1}>
-                    {file.name}
-                  </Text>
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel={`移除附件 ${file.name}`}
-                    onPress={() => {
-                      const next = latestDraft.current.files.filter((f) => f.id !== file.id);
-                      latestDraft.current.files = next;
-                      setFiles(next);
-                    }}
-                    hitSlop={6}
-                  >
-                    <Icon name="close" size={14} color={palette.secondary} />
-                  </Pressable>
-                </View>
-              ))}
-              {uploading && <Text style={styles.progressText}>上传中…</Text>}
-            </View>
-          )}
+          <Attachments files={files} uploading={uploading} onRemove={(id) => {
+            const removed = latestDraft.current.files.find((file) => file.id === id);
+            if (Platform.OS !== 'web' && removed?.previewUri?.startsWith(`${FileSystem.documentDirectory}attachment-previews/`))
+              void FileSystem.deleteAsync(removed.previewUri, { idempotent: true }).catch(() => {});
+            const next = latestDraft.current.files.filter((file) => file.id !== id);
+            latestDraft.current.files = next; setFiles(next);
+          }} />
           <View style={styles.composer}>
             <Pressable
               accessibilityRole="button"
@@ -791,6 +857,13 @@ export function Chat({
               });
             }}
           />
+          <ChatControls history={history} client={client} deviceId={deviceId} sending={sending}
+            mode={selectedSettings?.mode ?? history.mode ?? 'default'} disabled={!online || !draftReady || sending || uploading}
+            onRefresh={() => void load()}
+            onMode={(mode) => {
+              const next = { ...latestDraft.current.settings, mode };
+              latestDraft.current.settings = next; setSelectedSettings(next);
+            }} />
           {!online && (
             <Text style={styles.connectionHint}>
               {clientState.status === 'reconnecting' || clientState.status === 'connecting'
@@ -800,6 +873,19 @@ export function Chat({
           )}
         </View>
       </View>
+      <Modal visible={recent.length > 0} transparent animationType="fade" onRequestClose={() => {
+        void handleRecentImages(recent).then(() => setRecent([])).catch((e: Error) => setError(e.message));
+      }}>
+        <View style={styles.recentOverlay}><View style={styles.recentPanel}>
+          <Text style={styles.promptTitle}>检测到近期图片，是否添加到当前会话的附件？</Text>
+          <Text style={styles.promptDescription}>相册中最近 5 分钟拍摄或修改的 {recent.length} 张图片。确认后添加附件，不发送消息。</Text>
+          <Button label="添加近期图片" disabled={uploading || sending || !online} onPress={() => void addRecent()} />
+          <Button label="忽略近期图片" subtle disabled={uploading} onPress={() => {
+            void handleRecentImages(recent).then(() => setRecent([])).catch((e: Error) => setError(e.message));
+          }} />
+          {!!error && <Text style={common.error}>{error}</Text>}
+        </View></View>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
@@ -807,7 +893,7 @@ const createStyles = (palette: Palette) =>
   StyleSheet.create({
     chat: { flex: 1, backgroundColor: palette.background },
     messages: { flexGrow: 1, paddingTop: 20, paddingBottom: 22 },
-    chatWidth: { width: '100%', maxWidth: 760, alignSelf: 'center', paddingHorizontal: 21 },
+    chatWidth: { width: '100%', maxWidth: 760, alignSelf: 'center', paddingHorizontal: 16 },
     message: { marginVertical: 13, alignSelf: 'flex-start', width: '100%', maxWidth: '100%' },
     messageText: { fontSize: 16, lineHeight: 26, color: palette.ink },
     userMessage: {
@@ -822,7 +908,7 @@ const createStyles = (palette: Palette) =>
       marginBottom: 18,
     },
     attachedNames: { fontSize: 12, color: palette.muted, marginTop: 9 },
-    execution: { marginVertical: 6 },
+    execution: { marginVertical: 5, paddingHorizontal: 10, borderWidth: 1, borderColor: palette.line, borderRadius: 12 },
     executionHeading: { flexDirection: 'row', alignItems: 'center', gap: 9, paddingVertical: 8 },
     executionDot: { width: 4, height: 4, borderRadius: 2, backgroundColor: palette.muted },
     executionTitle: { flex: 1, fontSize: 12, lineHeight: 19, color: palette.secondary },
@@ -836,8 +922,8 @@ const createStyles = (palette: Palette) =>
     },
     executionOutput: { fontSize: 11, lineHeight: 18, color: palette.secondary },
     mono: { fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
-    empty: { flex: 1, paddingTop: 130, paddingBottom: 70, alignItems: 'center' },
-    emptyTitle: { fontSize: 26, fontWeight: '600', letterSpacing: -0.6, color: palette.ink },
+    empty: { flex: 1, paddingTop: 70, paddingBottom: 45, alignItems: 'center' },
+    emptyTitle: { fontSize: 22, fontWeight: '600', letterSpacing: -0.4, color: palette.ink },
     emptyHint: { fontSize: 13, color: palette.muted, marginTop: 13 },
     progress: {
       flexDirection: 'row',
@@ -848,7 +934,9 @@ const createStyles = (palette: Palette) =>
     },
     progressDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: palette.secondary },
     progressText: { fontSize: 12, color: palette.muted },
-    composerOuter: { backgroundColor: palette.background, paddingTop: 10 },
+    composerOuter: { backgroundColor: palette.background, paddingTop: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.line },
+    recentOverlay: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 22, backgroundColor: '#0005' },
+    recentPanel: { width: '100%', maxWidth: 440, padding: 22, borderRadius: 18, backgroundColor: palette.background, gap: 14 },
     composer: {
       flexDirection: 'row',
       alignItems: 'flex-end',

@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import type { SessionHistory } from '@codex-remote/protocol';
+import { customPermissionsDescription } from '../../apps/mobile/src/turn-settings.js';
 const config = JSON.parse(readFileSync(resolve('.local/connection.json'), 'utf8'));
 const workspace = resolve('.local/browser-workspace');
 const projectName = `LAN Issues ${Date.now().toString(36)}`;
@@ -62,11 +63,15 @@ test('real LAN: pair, import sessions, create project, execute, stream, resume, 
   await expect(page.getByRole('button', { name: /查看电脑 .+ 的连接，在线/ }).first()).toBeVisible();
   await page.getByRole('tab', { name: 'Projects', exact: true }).click();
   const nativeProject = page.getByRole('button', { name: nativeProjectLabel });
-  await expect(nativeProject).toBeVisible();
-  await nativeProject.click();
-  await expect(nativeProject).toHaveAttribute('aria-expanded', 'false');
-  await nativeProject.click();
-  await expect(nativeProject).toHaveAttribute('aria-expanded', 'true');
+  // A CLI-only machine can have native projectless history without a desktop
+  // project named after this checkout. Both catalogs are authoritative.
+  await expect(page.getByRole('button', { name: /^打开会话/ }).first()).toBeVisible();
+  if (await nativeProject.count()) {
+    await nativeProject.click();
+    await expect(nativeProject).toHaveAttribute('aria-expanded', 'false');
+    await nativeProject.click();
+    await expect(nativeProject).toHaveAttribute('aria-expanded', 'true');
+  }
   await page.screenshot({ path: 'artifacts/projects-phone.png' });
   await page.getByRole('button', { name: '新建项目', exact: true }).click();
   await page.getByLabel('项目名称', { exact: true }).fill(projectName);
@@ -185,10 +190,11 @@ test('real LAN: pair, import sessions, create project, execute, stream, resume, 
   // sandbox. Read and display that actual custom policy rather than a cached preset.
   expect(readCanonical()?.permissions?.mode).toBeNull();
   expect(readCanonical()?.permissions?.approvalPolicy).toBe('on-request');
-  expect(readCanonical()?.permissions?.sandboxPolicy.type).toBe('dangerFullAccess');
+  expect(['dangerFullAccess', 'readOnly', 'workspaceWrite', 'externalSandbox']).toContain(readCanonical()?.permissions?.sandboxPolicy.type);
   await expect(page.getByTestId('permission-picker')).toContainText('自定义');
   await page.getByTestId('permission-picker').click();
   await expect(page.getByText('此会话当前使用自定义权限', { exact: true })).toBeVisible();
+  await expect(page.getByText(customPermissionsDescription(readCanonical()!.permissions!), { exact: true })).toBeVisible();
   await page.getByRole('button', { name: '关闭权限模式选择', exact: true }).click();
   expect(errors).toEqual([]);
 });

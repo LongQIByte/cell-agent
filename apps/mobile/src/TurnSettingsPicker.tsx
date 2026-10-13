@@ -175,9 +175,10 @@ export function TurnSettingsPicker({
               pressed && { opacity: 0.7 },
             ]}
           >
-            <Text style={styles.triggerText} numberOfLines={1}>
-              {button.title}：{button.value}
-            </Text>
+            <View style={styles.triggerLabels}>
+              <Text style={styles.triggerTitle}>{button.title}</Text>
+              <Text style={styles.triggerText}>{button.value}</Text>
+            </View>
             {button.section === 'model' && loading ? (
               <ActivityIndicator size="small" color={palette.muted} />
             ) : (
@@ -282,9 +283,11 @@ export function TurnSettingsPicker({
 }
 
 const createStyles = (palette: Palette) => StyleSheet.create({
-  triggers: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', columnGap: 6 },
-  trigger: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 10, paddingHorizontal: 6, maxWidth: '100%' },
-  triggerText: { fontSize: 12, color: palette.secondary, flexShrink: 1 },
+  triggers: { flexDirection: 'row', alignItems: 'stretch', gap: 5, marginTop: 8 },
+  trigger: { flex: 1, minWidth: 0, minHeight: 46, flexDirection: 'row', alignItems: 'center', gap: 3, paddingVertical: 6, paddingHorizontal: 7, borderRadius: 10, backgroundColor: palette.soft },
+  triggerLabels: { flex: 1, minWidth: 0 },
+  triggerTitle: { fontSize: 9, lineHeight: 13, color: palette.muted },
+  triggerText: { fontSize: 11, lineHeight: 16, color: palette.secondary },
   errorHint: { fontSize: 11, color: palette.error, paddingHorizontal: 6 },
   overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.3)', justifyContent: 'center', alignItems: 'center', padding: 22 },
   panel: { width: '100%', maxWidth: 480, maxHeight: '75%', backgroundColor: palette.background, borderRadius: 17, paddingTop: 18, paddingHorizontal: 19, paddingBottom: 10 },
