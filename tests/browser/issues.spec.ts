@@ -70,6 +70,35 @@ test('new session header, rename, fork, photo previews and Plan/Goal controls pr
   await page.screenshot({ path: 'artifacts/mobile-issues-chat.png', animations: 'disabled' });
 });
 
+test('image previews fit their actual ratio and user bubbles shrink around tall and wide images', async ({ page }) => {
+  const fixture = await connectFixture(page);
+  await page.getByRole('button', { name: '打开会话 Native session 1', exact: true }).click();
+  const shapes = [[1200, 600], [600, 1200], [800, 800], [400, 4000]];
+  const sources = await page.evaluate((sizes) => sizes.map(([width, height]) => {
+    const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
+    const context = canvas.getContext('2d')!; context.fillStyle = '#2f6ba6'; context.fillRect(0, 0, width, height);
+    return canvas.toDataURL('image/png');
+  }), shapes);
+  fixture.imageItem({ id: 'ratios', turnId: 'image-turn', kind: 'user', text: '', timestamp: 2000,
+    images: sources.map((source, index) => ({ source, name: `ratio-${index}` })) });
+  for (const width of [320, 390, 820]) {
+    await page.setViewportSize({ width, height: 844 });
+    for (const [index, shape] of shapes.entries()) {
+      const preview = page.getByRole('button', { name: `预览图片 ratio-${index}`, exact: true });
+      await expect.poll(async () => {
+        const box = await preview.boundingBox(); return box ? box.width / box.height : 0;
+      }).toBeCloseTo(shape[0] / shape[1], 2);
+      const box = (await preview.boundingBox())!;
+      expect(box.width).toBeLessThanOrEqual(260);
+      expect(box.height).toBeLessThanOrEqual(220);
+      expect(box.x + box.width).toBeLessThanOrEqual(width);
+    }
+  }
+  await page.getByRole('button', { name: '预览图片 ratio-3', exact: true }).click();
+  await expect(page.getByRole('img', { name: '大图 ratio-3', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '关闭图片预览', exact: true }).click();
+});
+
 test('cache hit rate follows live turn usage and distinguishes zero hits from unavailable input', async ({ page }) => {
   const fixture = await connectFixture(page);
   await page.getByRole('button', { name: '打开会话 Native session 1', exact: true }).click();

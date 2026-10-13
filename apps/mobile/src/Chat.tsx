@@ -963,7 +963,7 @@ const createStyles = (palette: Palette) =>
       marginBottom: 18,
     },
     attachedNames: { fontSize: 12, color: palette.muted, marginTop: 9 },
-    imageMessage: { width: '88%', maxWidth: 480 },
+    imageMessage: { padding: 8, gap: 4 },
     execution: { marginVertical: 5, paddingHorizontal: 10, borderWidth: 1, borderColor: palette.line, borderRadius: 12 },
     executionHeading: { flexDirection: 'row', alignItems: 'center', gap: 9, paddingVertical: 8 },
     executionDot: { width: 4, height: 4, borderRadius: 2, backgroundColor: palette.muted },
