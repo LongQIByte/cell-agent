@@ -179,6 +179,7 @@ export class AgentService extends EventEmitter {
     }
     if (method === 'thread/tokenUsage/updated') {
       let snapshot = this.metricSnapshot(threadId);
+      if (snapshot?.metrics.turnId && snapshot.metrics.turnId !== params.turnId) return;
       if (!snapshot || snapshot.metrics.turnId !== params.turnId) {
         // Late notifications for an older turn must never reset an active turn.
         if (this.active.has(threadId) && this.active.get(threadId) !== params.turnId) return;
@@ -198,6 +199,8 @@ export class AgentService extends EventEmitter {
       this.runtime.set(threadId, []);
       this.publish('session/status', { threadId, turnId: params.turn.id, status: 'inProgress' });
     } else if (method === 'turn/completed') {
+      if (this.active.has(threadId) && this.active.get(threadId) !== params.turn.id) return;
+      if (this.metricSnapshot(threadId)?.metrics.turnId && this.metricSnapshot(threadId)?.metrics.turnId !== params.turn.id) return;
       const snapshot = this.metricSnapshot(threadId);
       if (snapshot && snapshot.metrics.turnId === params.turn.id) {
         snapshot.metrics.status = params.turn.status === 'interrupted' ? 'stopped' : params.turn.status === 'failed' ? 'failed' : 'completed';

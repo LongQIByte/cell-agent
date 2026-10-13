@@ -15,6 +15,11 @@ test('new session header, rename, fork, photo previews and Plan/Goal controls pr
   await page.getByRole('button', { name: '创建分支', exact: true }).click();
   await expect(page.getByTestId('chat-screen')).toBeVisible();
   await expect(page.getByText('分支会话 · 来源 native-0', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '打开来源会话', exact: true }).click();
+  await expect(page.getByText('分支会话 · 来源 native-0', { exact: true })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: '打开会话 手机重命名 · 分支', exact: true }).click();
+  await expect(page.getByText('分支会话 · 来源 native-0', { exact: true })).toBeVisible();
   const input = page.getByRole('textbox', { name: '消息输入框', exact: true });
   await input.fill('保留草稿');
   const chooser = page.waitForEvent('filechooser');

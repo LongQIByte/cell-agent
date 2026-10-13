@@ -493,6 +493,8 @@ function Main() {
                 client={client}
                 clientState={state}
                 server={connection?.server ?? ''}
+                onOpenSource={(session) => openSelection({ deviceId: selected.deviceId, session,
+                  project: projects.find((project) => project.deviceId === selected.deviceId && project.id === session.projectId) ?? null })}
               />
             </View>
           ) : tab === 'settings' ? (

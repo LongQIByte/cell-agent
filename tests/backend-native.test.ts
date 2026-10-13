@@ -57,6 +57,46 @@ test('rename and fork use native metadata; Plan and Goal lifecycle recover canon
 const thread = (id: string, cwd: string, projectId: string | null, updatedAt = 1): ThreadFixture => ({
   id, cwd, projectId, name: id, updatedAt, createdAt: 1, model: 'model-a', reasoningEffort: 'low',
 });
+test('metrics survive restart and ignore tool output, repeated snapshots, stale turns and other-thread events', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'cell-agent-metrics-')));
+  const native = new NativeCodex(); native.threads = [thread('one', root, null), thread('two', root, null)];
+  const database = join(root, 'agent.sqlite');
+  let service = new AgentService(native as unknown as CodexRpc, new AgentStore(database), 'machine', root);
+  const emit = (method: string, params: any) => native.emit('notification', { method, params: { threadId: 'one', ...params } });
+  const usage = (input: number, output: number) => ({ totalTokens: input + output, inputTokens: input, outputTokens: output, cachedInputTokens: 0, reasoningOutputTokens: 0 });
+  try {
+    emit('turn/started', { turn: { id: 't1' } });
+    emit('thread/tokenUsage/updated', { turnId: 't1', tokenUsage: { total: usage(100, 10), last: usage(100, 10), modelContextWindow: 1000 } });
+    emit('turn/completed', { turn: { id: 't1', status: 'completed' } });
+    emit('turn/started', { turn: { id: 't2' } });
+    emit('item/agentMessage/delta', { turnId: 't2', itemId: 'a', delta: '你好😀' });
+    emit('item/completed', { turnId: 't2', item: { id: 'a', type: 'agentMessage', text: '你好😀' } });
+    emit('item/commandExecution/outputDelta', { turnId: 't2', itemId: 'tool', delta: 'ignored'.repeat(100) });
+    let history = await service.readSession('one');
+    assert.equal(history.metrics?.assistantCharacters, 3);
+    native.emit('request', { id: 55, method: 'item/tool/requestUserInput', params: { threadId: 'one', questions: [{ id: 'q', question: 'Ready?' }] } });
+    history = await service.readSession('one');
+    assert.equal(history.metrics?.status, 'confirmation');
+    await service.handle('requests/respond', { requestId: history.requests[0].id, action: 'accept', answers: { q: ['Yes'] } });
+    assert.equal((await service.readSession('one')).metrics?.status, 'waiting');
+    emit('thread/compacted', {});
+    assert.equal((await service.readSession('one')).metrics?.contextUsed, null);
+    emit('thread/tokenUsage/updated', { turnId: 't2', tokenUsage: { total: usage(140, 20), last: usage(30, 10), modelContextWindow: 1000 } });
+    emit('thread/tokenUsage/updated', { turnId: 't1', tokenUsage: { total: usage(9999, 999), last: usage(9999, 999), modelContextWindow: 1000 } });
+    emit('turn/completed', { turn: { id: 't2', status: 'interrupted' } });
+    emit('thread/tokenUsage/updated', { turnId: 't1', tokenUsage: { total: usage(9999, 999), last: usage(9999, 999), modelContextWindow: 1000 } });
+    emit('turn/completed', { turn: { id: 't1', status: 'failed' } });
+    const final = await service.readSession('one');
+    assert.equal(final.metrics?.status, 'stopped');
+    assert.equal(final.metrics?.contextUsed, 40);
+    assert.deepEqual(final.metrics?.usage, usage(40, 10));
+    assert.equal((await service.readSession('two')).metrics, null);
+    service.close();
+    const restarted = new NativeCodex(); restarted.threads = native.threads;
+    service = new AgentService(restarted as unknown as CodexRpc, new AgentStore(database), 'machine', root);
+    assert.deepEqual((await service.readSession('one')).metrics, final.metrics);
+  } finally { service.close(); await rm(root, { recursive: true, force: true }); }
+});
 class NativeCodex extends EventEmitter {
   ready = Promise.resolve();
   projects: { id: string; name: string; roots: { path: string }[]; updatedAt: number }[] = [];

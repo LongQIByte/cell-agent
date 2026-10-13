@@ -239,6 +239,7 @@ export function Chat({
   client,
   clientState,
   server,
+  onOpenSource,
 }: {
   project: Project | null;
   deviceId: string;
@@ -246,6 +247,7 @@ export function Chat({
   client: RemoteClient | null;
   clientState: ClientState;
   server: string;
+  onOpenSource: (session: Session) => void;
 }) {
   const { palette, common, scheme } = useUI();
   const styles = useThemedStyles(createStyles);
@@ -701,7 +703,19 @@ export function Chat({
               <Text style={styles.emptyHint}>继续思考，开始创造。</Text>
             </View>
           )}
-          {!!history.session.forkedFromId && <Text style={styles.connectionHint}>分支会话 · 来源 {history.session.forkedFromId}</Text>}
+          {!!history.session.forkedFromId && <View>
+            <Text style={styles.connectionHint}>分支会话 · 来源 {history.session.forkedFromId}</Text>
+            <Button label="打开来源会话" subtle disabled={!online || loading || sending} style={{ minHeight: 36, paddingVertical: 6 }} onPress={() => {
+              if (!client) return;
+              void (async () => {
+                try {
+                  await persistDraft();
+                  const source = await client.request<SessionHistory>('sessions/read', { threadId: history.session.forkedFromId }, deviceId);
+                  if (alive.current) onOpenSource(source.session);
+                } catch (e) { if (alive.current) setError((e as Error).message); }
+              })();
+            }} />
+          </View>}
           {history.items.map((item) => (
             <Message key={`${item.turnId}:${item.id}`} item={item} />
           ))}
