@@ -49,6 +49,14 @@ export function applySessionEvent(
     next.reasoningEffort = p.reasoningEffort;
     next.permissions = p.permissions;
     next.permissionsUnavailableReason = p.permissionsUnavailableReason;
+  } else if (event.method === 'session/metrics') {
+    next.metrics = p.metrics;
+  } else if (event.method === 'session/goal') {
+    next.goal = p.goal;
+  } else if (event.method === 'session/name') {
+    next.session = { ...state.session, name: p.name };
+  } else if (event.method === 'session/mode') {
+    next.mode = p.mode;
   } else if (event.method === 'session/request') {
     next.requests = [
       ...state.requests.filter((r) => r.id !== p.request.id),

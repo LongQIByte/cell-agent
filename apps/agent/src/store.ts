@@ -17,7 +17,15 @@ export class AgentStore {
     if (path !== ':memory:') chmodSync(path, 0o600);
     this.db.exec(`PRAGMA journal_mode=WAL;
       CREATE TABLE IF NOT EXISTS uploaded_files (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, name TEXT NOT NULL, mime_type TEXT NOT NULL, size INTEGER NOT NULL, path TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS turn_requests (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, result TEXT, created_at INTEGER NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS turn_requests (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, result TEXT, created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS runtime_metrics (thread_id TEXT PRIMARY KEY, snapshot TEXT NOT NULL);`);
+  }
+  metrics<T>(threadId: string): T | null {
+    const row = this.db.prepare('SELECT snapshot FROM runtime_metrics WHERE thread_id=?').get(threadId) as { snapshot: string } | undefined;
+    return row ? JSON.parse(row.snapshot) : null;
+  }
+  saveMetrics(threadId: string, snapshot: unknown) {
+    this.db.prepare('INSERT OR REPLACE INTO runtime_metrics VALUES (?, ?)').run(threadId, JSON.stringify(snapshot));
   }
   attachment(id: string) {
     return this.db.prepare('SELECT * FROM uploaded_files WHERE id=?').get(id) as unknown as

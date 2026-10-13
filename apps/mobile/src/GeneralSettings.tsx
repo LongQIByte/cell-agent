@@ -1,8 +1,9 @@
-import React from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { useState } from 'react';
+import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import app from '../app.json';
 import { DEFAULT_PREFERENCES, MAX_PROJECT_RATIO, MIN_PROJECT_RATIO, clampProjectRatio } from './preferences';
 import { Button, usePreferences, useThemedStyles, useUI, type Palette } from './ui';
+import { allowRecentImages } from './recent-images';
 
 function Choices<T extends string>({ label, options, value, onSelect }: {
   label: string;
@@ -34,6 +35,7 @@ export function GeneralSettings() {
   const { palette, common } = useUI();
   const styles = useThemedStyles(createStyles);
   const projectPercent = Math.round(preferences.projectRatio * 100);
+  const [photoStatus, setPhotoStatus] = useState('');
   function adjustRatio(delta: number) {
     updatePreferences({ projectRatio: clampProjectRatio(Math.round((preferences.projectRatio + delta) * 100) / 100) });
   }
@@ -72,6 +74,13 @@ export function GeneralSettings() {
       </View>
       <View style={styles.setting}>
         <Text style={styles.label}>其他配置信息</Text>
+        {Platform.OS !== 'web' && <>
+          <Text style={styles.help}>近期图片：授权后，返回会话时提示添加相册中最近 5 分钟的图片。仅在确认后上传，不自动发送。</Text>
+          <Button label="允许检测近期图片" subtle onPress={() => {
+            void allowRecentImages().then((allowed) => setPhotoStatus(allowed ? '已允许，请返回会话查看近期图片' : '未授权，仍可手动添加附件')).catch((e: Error) => setPhotoStatus(e.message));
+          }} />
+          {!!photoStatus && <Text style={styles.help}>{photoStatus}</Text>}
+        </>}
         <View style={styles.info}>
           <Text style={styles.help}>应用版本</Text>
           <Text style={styles.infoValue}>{app.expo.version}</Text>

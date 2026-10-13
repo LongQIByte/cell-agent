@@ -51,6 +51,8 @@ interface ProjectsProps {
   onArchive: (project: Project) => void;
   onArchiveSession: (deviceId: string, session: Session) => void;
   onRestoreSession: (deviceId: string, session: Session) => void;
+  onRenameSession: (entry: RecentSession, name: string) => Promise<void>;
+  onForkSession: (entry: RecentSession) => Promise<void>;
   onSettings: () => void;
   onCreateProject: () => void;
   onCreateSession: (project: Project) => void;
@@ -94,6 +96,7 @@ const SessionRow = memo(function SessionRow({
         <View style={styles.sessionText}>
           <Text style={styles.sessionName} numberOfLines={1}>{session.name}</Text>
           {pinned && <Text style={styles.pinnedLabel}>已置顶</Text>}
+          {!!session.forkedFromId && <Text style={styles.pinnedLabel}>分支 · 来源 {session.forkedFromId.slice(0, 8)}</Text>}
           {!project && (
             <Text style={styles.recentMachine} numberOfLines={1}>
               {machine?.name ?? '电脑'}{machine?.online ? '' : ' · 未知'}
@@ -133,6 +136,8 @@ export function Projects({
   onArchive,
   onArchiveSession,
   onRestoreSession,
+  onRenameSession,
+  onForkSession,
   onSettings,
   onCreateProject,
   onCreateSession,
@@ -247,7 +252,7 @@ export function Projects({
         }
         renderSectionHeader={({ section }) => {
           const project = section.project;
-          if (!project) return <Text accessibilityRole="header" style={styles.recentHeading}>最近对话</Text>;
+          if (!project) return <Text accessibilityRole="header" style={styles.recentHeading}>{section.pinned ? '置顶对话' : '最近对话'}</Text>;
           const machine = devices.get(project.deviceId);
           const key = projectKey(project);
           return (
@@ -266,15 +271,15 @@ export function Projects({
                 <Text style={[styles.projectName, compact && styles.compactProjectName]} numberOfLines={1}>{project.name}</Text>
                 <Text style={[styles.machine, !machine?.online && { color: palette.muted }]} numberOfLines={1}>{machine?.name ?? '电脑'}</Text>
               </Pressable>
-              {!archived && project.sessions.length > 0 && (
+              {!archived && (
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel={`归档项目 ${project.name}`}
-                  disabled={!machine?.online || !!archivingId}
-                  onPress={() => setConfirmation(project)}
-                  style={[styles.action, (!machine?.online || !!archivingId) && { opacity: 0.4 }]}
+                  accessibilityLabel={`在 ${project.name} 新建会话`}
+                  disabled={!machine?.online || !project.available || !!creatingId}
+                  onPress={() => onCreateSession(project)}
+                  style={[styles.action, (!machine?.online || !project.available || !!creatingId) && { opacity: 0.4 }]}
                 >
-                  {archivingId === key ? <ActivityIndicator size="small" /> : <Icon name="archive" size={18} color={palette.secondary} />}
+                  {creatingId === key ? <ActivityIndicator size="small" /> : <Icon name="plus" size={20} color={palette.secondary} />}
                 </Pressable>
               )}
             </View>
@@ -283,7 +288,7 @@ export function Projects({
         renderItem={({ item, section }) => (
           <SessionRow
             session={item.session}
-            project={section.project}
+            project={section.project ?? projects.find((project) => project.deviceId === item.deviceId && project.id === item.session.projectId) ?? null}
             deviceId={item.deviceId}
             machine={devices.get(item.deviceId)}
             pending={archivingId === `${item.deviceId}:${item.session.id}`}
@@ -313,20 +318,20 @@ export function Projects({
                       <Text style={styles.moreText}>显示更多（{section.total - section.data.length}）</Text>
                     </Pressable>
                   )}
-                  {!archived && (
+                  {!archived && project.sessions.length > 0 && (
                     <Pressable
                       accessibilityRole="button"
-                      accessibilityLabel={`在 ${project.name} 新建会话`}
-                      disabled={createDisabled}
-                      onPress={() => onCreateSession(project)}
+                      accessibilityLabel={`归档项目 ${project.name}`}
+                      disabled={!machine?.online || !!archivingId}
+                      onPress={() => setConfirmation(project)}
                       style={({ pressed }) => [
                         styles.newSession,
                         createDisabled && { opacity: 0.45 },
                         pressed && !createDisabled && { backgroundColor: palette.line },
                       ]}
                     >
-                      <Icon name="plus" size={16} color={palette.secondary} />
-                      <Text style={styles.newSessionText}>{creatingId === key ? '创建中…' : '新建会话'}</Text>
+                      <Icon name="archive" size={13} color={palette.muted} />
+                      <Text style={styles.archiveText}>归档项目</Text>
                     </Pressable>
                   )}
                   {!project.available && <Text style={styles.pathMissing}>电脑上的目录暂不可用</Text>}
@@ -350,6 +355,8 @@ export function Projects({
           }}
           onArchive={() => { onArchiveSession(actionEntry.deviceId, actionEntry.session); setActionEntry(null); }}
           onRestore={() => { onRestoreSession(actionEntry.deviceId, actionEntry.session); setActionEntry(null); }}
+          onRename={(name) => onRenameSession(actionEntry, name)}
+          onFork={() => onForkSession(actionEntry)}
           onClose={() => setActionEntry(null)}
         />
       )}
@@ -374,12 +381,12 @@ export function Projects({
 }
 
 const createStyles = (palette: Palette) => StyleSheet.create({
-  content: { flexGrow: 1, paddingTop: 38, paddingBottom: 36 },
+  content: { flexGrow: 1, paddingTop: 24, paddingBottom: 28 },
   compactContent: { paddingHorizontal: 14, paddingTop: 16 },
   compactTitle: { fontSize: 27, lineHeight: 36 },
   heading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   add: { padding: 8, borderRadius: 24 },
-  filters: { flexDirection: 'row', gap: 8, marginTop: 24 },
+  filters: { flexDirection: 'row', gap: 8, marginTop: 18 },
   filter: { paddingHorizontal: 14, paddingVertical: 10, borderRadius: 8 },
   projectHeading: { flexDirection: 'row', alignItems: 'center', paddingTop: 26 },
   recentHeading: { fontSize: 18, fontWeight: '600', color: palette.ink, paddingTop: 26, paddingBottom: 12 },
@@ -390,16 +397,16 @@ const createStyles = (palette: Palette) => StyleSheet.create({
   overlay: { flex: 1, backgroundColor: '#0005', justifyContent: 'center', alignItems: 'center', padding: 24 },
   confirmation: { width: '100%', maxWidth: 420, padding: 24, borderRadius: 14, backgroundColor: palette.background },
   confirmActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 8, marginTop: 24 },
-  search: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 31, paddingBottom: 13, borderBottomColor: palette.line, borderBottomWidth: 1 },
+  search: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 18, padding: 12, borderRadius: 12, backgroundColor: palette.soft },
   searchInput: { flex: 1, color: palette.ink, fontSize: 14, padding: 0, minHeight: 24 },
   sectionFooter: { paddingBottom: 22, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: palette.line },
   projectRow: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', paddingVertical: 8 },
-  projectName: { flex: 1, minWidth: 0, color: palette.ink, fontWeight: '600', fontSize: 18, letterSpacing: -0.35, marginRight: 13 },
+  projectName: { flex: 1, minWidth: 0, color: palette.ink, fontWeight: '600', fontSize: 16, letterSpacing: -0.2, marginRight: 10 },
   compactProjectName: { fontSize: 16, marginRight: 8 },
   machine: { flexShrink: 1, maxWidth: '35%', fontSize: 12, color: palette.muted },
   sessionRow: { minHeight: 47, paddingLeft: 29, flexDirection: 'row', alignItems: 'center', gap: 4 },
   recentRow: { paddingLeft: 0, minHeight: 57 },
-  sessionName: { fontSize: 15, color: palette.secondary, lineHeight: 22 },
+  sessionName: { fontSize: 14, color: palette.secondary, lineHeight: 22 },
   pinnedLabel: { fontSize: 10, color: palette.muted, marginTop: 2 },
   menuIcon: { fontSize: 22, lineHeight: 28, color: palette.muted },
   time: { color: palette.muted, fontSize: 12, minWidth: 43, textAlign: 'right' },
@@ -407,11 +414,11 @@ const createStyles = (palette: Palette) => StyleSheet.create({
   moreText: { fontSize: 13, color: palette.secondary },
   newSession: {
     alignSelf: 'flex-start', marginLeft: 29, marginTop: 8, minHeight: 44,
-    paddingHorizontal: 12, paddingVertical: 10, borderRadius: 10, borderWidth: 1,
-    borderColor: palette.line, backgroundColor: palette.soft,
+    paddingHorizontal: 0, paddingVertical: 8,
     flexDirection: 'row', alignItems: 'center', gap: 8,
   },
   newSessionText: { fontSize: 14, lineHeight: 20, fontWeight: '500', color: palette.secondary },
+  archiveText: { fontSize: 11, lineHeight: 18, color: palette.muted },
   pathMissing: { color: palette.muted, fontSize: 12, paddingLeft: 29, marginTop: 6 },
   empty: { marginTop: 86 },
   emptyTitle: { color: palette.ink, fontSize: 22, lineHeight: 32, letterSpacing: -0.4 },

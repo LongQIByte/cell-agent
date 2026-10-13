@@ -17,7 +17,6 @@
       "allowBackup": false,
       "blockedPermissions": [
         "android.permission.SYSTEM_ALERT_WINDOW",
-        "android.permission.READ_EXTERNAL_STORAGE",
         "android.permission.WRITE_EXTERNAL_STORAGE"
       ]
     },
@@ -39,6 +38,7 @@
     "plugins": [
       "expo-secure-store",
       "expo-document-picker",
+      ["expo-media-library", { "photosPermission": "允许查看近期图片，并由你确认是否添加到当前会话。", "granularPermissions": ["photo"], "preventAutomaticLimitedAccessAlert": true }],
       "expo-sqlite",
       [
         "expo-build-properties",

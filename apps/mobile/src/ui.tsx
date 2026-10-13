@@ -32,8 +32,8 @@ export function scaleTextStyles<T extends StyleSheet.NamedStyles<T>>(styles: T, 
 const commonStyles = (palette: Palette) => StyleSheet.create({
   page: { flex: 1, backgroundColor: palette.background },
   content: { width: '100%', maxWidth: 760, alignSelf: 'center', paddingHorizontal: 24 },
-  title: { fontSize: 34, lineHeight: 42, fontWeight: '700', color: palette.ink, letterSpacing: -1 },
-  subtitle: { fontSize: 14, lineHeight: 22, color: palette.muted, marginTop: 9 },
+  title: { fontSize: 28, lineHeight: 36, fontWeight: '600', color: palette.ink, letterSpacing: -0.6 },
+  subtitle: { fontSize: 13, lineHeight: 21, color: palette.muted, marginTop: 8 },
   label: { fontSize: 13, color: palette.secondary, marginBottom: 10 },
   field: {
     minHeight: 48, fontSize: 16, color: palette.ink, paddingVertical: 12,

@@ -21,6 +21,39 @@ interface ThreadFixture {
   reasoningEffort: string | null;
   parentThreadId?: string;
 }
+
+test('rename and fork use native metadata; Plan and Goal lifecycle recover canonical state after restart', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'cell-agent-modes-')));
+  const native = new NativeCodex();
+  native.threads = [thread('source', root, 'native-project')];
+  const database = join(root, 'agent.sqlite');
+  let service = new AgentService(native as unknown as CodexRpc, new AgentStore(database), 'machine', root);
+  try {
+    await service.handle('sessions/rename', { threadId: 'source', name: '新名称' });
+    const fork = await service.handle('sessions/fork', { threadId: 'source' }) as { session: any };
+    assert.equal(fork.session.forkedFromId, 'source');
+    assert.equal(fork.session.projectId, 'native-project');
+    assert.equal(native.threads[0].name, '新名称');
+    await service.handle('sessions/send', { threadId: fork.session.id, text: '请制定计划', mode: 'plan', idempotencyKey: 'plan-native' });
+    assert.equal(native.starts[0].collaborationMode.mode, 'plan');
+    assert.equal(native.starts[0].collaborationMode.settings.developer_instructions, null);
+    await service.handle('sessions/send', { threadId: fork.session.id, text: '执行计划', mode: 'default', idempotencyKey: 'execute-native' });
+    assert.equal(native.starts[1].collaborationMode.mode, 'default');
+    await service.handle('sessions/goal/set', { threadId: fork.session.id, objective: '完成测试目标', tokenBudget: 1000 });
+    await service.handle('sessions/goal/set', { threadId: fork.session.id, status: 'paused' });
+    assert.equal((await service.readSession(fork.session.id)).goal?.status, 'paused');
+    service.close();
+    const restarted = new NativeCodex();
+    restarted.threads = native.threads; restarted.goals = native.goals; restarted.modes = native.modes;
+    service = new AgentService(restarted as unknown as CodexRpc, new AgentStore(database), 'machine', root);
+    assert.equal((await service.readSession(fork.session.id)).goal?.objective, '完成测试目标');
+    await service.handle('sessions/goal/set', { threadId: fork.session.id, status: 'active' });
+    await service.handle('sessions/goal/set', { threadId: fork.session.id, status: 'complete' });
+    assert.equal((await service.readSession(fork.session.id)).goal?.status, 'complete');
+    await service.handle('sessions/goal/clear', { threadId: fork.session.id });
+    assert.equal((await service.readSession(fork.session.id)).goal, null);
+  } finally { service.close(); await rm(root, { recursive: true, force: true }); }
+});
 const thread = (id: string, cwd: string, projectId: string | null, updatedAt = 1): ThreadFixture => ({
   id, cwd, projectId, name: id, updatedAt, createdAt: 1, model: 'model-a', reasoningEffort: 'low',
 });
@@ -33,6 +66,8 @@ class NativeCodex extends EventEmitter {
   archives: string[] = [];
   responses: { id: number | string; result: unknown }[] = [];
   calls: { method: string; params: any }[] = [];
+  goals = new Map<string, any>();
+  modes = new Map<string, any>();
   foreignWriters = new Set<string>();
   settings = new Map<string, {
     model: string; reasoningEffort: string | null; approvalPolicy: ApprovalPolicy;
@@ -63,6 +98,7 @@ class NativeCodex extends EventEmitter {
   }
   async call(method: string, params: any): Promise<any> {
     this.calls.push({ method, params });
+    if (method === 'collaborationMode/list') return { data: [{ mode: 'default' }, { mode: 'plan' }] };
     if (method === 'project/list') return this.page(this.projects, params.cursor);
     if (method === 'project/read') {
       const project = this.projects.find((project) => project.id === params.projectId);
@@ -99,8 +135,22 @@ class NativeCodex extends EventEmitter {
     if (method === 'thread/resume') {
       if (this.foreignWriters.has(current.id))
         throw new RemoteError('CODEX_-32600', `thread ${current.id} already has an active writer`);
-      return { thread: current, ...this.configuration(current) };
+      return { thread: current, ...this.configuration(current), collaborationMode: this.modes.get(current.id) ?? null };
     }
+    if (method === 'thread/fork') {
+      const fork = { ...current, id: `fork-${this.threads.length}`, forkedFromId: current.id };
+      this.threads.push(fork);
+      return { thread: fork, ...this.configuration(fork) };
+    }
+    if (method === 'thread/goal/get') return { goal: this.goals.get(current.id) ?? null };
+    if (method === 'thread/goal/set') {
+      assert.equal(params.origin, 'user');
+      const goal = { threadId: current.id, objective: 'Original objective', status: 'active', tokenBudget: null,
+        tokensUsed: 0, timeUsedSeconds: 0, createdAt: 1, updatedAt: 1, ...this.goals.get(current.id), ...params };
+      this.goals.set(current.id, goal);
+      return { goal };
+    }
+    if (method === 'thread/goal/clear') { assert.equal(params.origin, 'user'); this.goals.delete(current.id); return { cleared: true }; }
     if (method === 'thread/name/set') {
       current.name = params.name;
       return {};
@@ -112,6 +162,7 @@ class NativeCodex extends EventEmitter {
     }
     if (method === 'turn/start') {
       this.starts.push(params);
+      if (params.collaborationMode) this.modes.set(current.id, params.collaborationMode);
       const settings = this.configuration(current);
       if (params.model) current.model = params.model;
       if (params.model) settings.model = params.model;

@@ -3,6 +3,63 @@ import { PROTOCOL_VERSION } from '@codex-remote/protocol';
 import type { Device, Model, Project, Session, RecentSession, SessionPermissions } from '@codex-remote/protocol';
 
 test.use({ actionTimeout: 10000 });
+test('new session header, rename, fork, photo previews and Plan/Goal controls preserve drafts at narrow widths', async ({ page }) => {
+  const fixture = await connectFixture(page);
+  await expect(page.getByRole('button', { name: '在 Native Group 新建会话', exact: true })).toHaveCount(2);
+  await page.getByRole('button', { name: '管理会话 Native session 1', exact: true }).click();
+  await page.getByRole('button', { name: '重命名', exact: true }).click();
+  await page.getByRole('textbox', { name: '会话名称', exact: true }).fill('手机重命名');
+  await page.getByRole('button', { name: '保存名称', exact: true }).click();
+  await expect(page.getByRole('button', { name: '打开会话 手机重命名', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '管理会话 手机重命名', exact: true }).click();
+  await page.getByRole('button', { name: '创建分支', exact: true }).click();
+  await expect(page.getByTestId('chat-screen')).toBeVisible();
+  await expect(page.getByText('分支会话 · 来源 native-0', { exact: true })).toBeVisible();
+  const input = page.getByRole('textbox', { name: '消息输入框', exact: true });
+  await input.fill('保留草稿');
+  const chooser = page.waitForEvent('filechooser');
+  await page.getByRole('button', { name: '添加附件', exact: true }).click();
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==', 'base64');
+  await (await chooser).setFiles([{ name: 'one.png', mimeType: 'image/png', buffer: png }, { name: 'two.png', mimeType: 'image/png', buffer: png }]);
+  await expect(page.getByRole('img', { name: '照片 one.png', exact: true })).toBeVisible();
+  await expect(page.getByRole('img', { name: '照片 two.png', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '预览附件 two.png', exact: true }).click();
+  await page.getByRole('button', { name: '关闭照片预览', exact: true }).click();
+  await page.getByRole('button', { name: '移除附件 one.png', exact: true }).click();
+  await expect(page.getByRole('img', { name: '照片 one.png', exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: '功能与模式', exact: true }).click();
+  await page.getByRole('button', { name: '计划模式 Plan', exact: true }).click();
+  await expect(input).toHaveValue('保留草稿');
+  await expect(page.getByRole('img', { name: '照片 two.png', exact: true })).toBeVisible();
+  expect(fixture.calls.filter((call) => call.method === 'sessions/send')).toHaveLength(0);
+  await page.reload();
+  await expect(page.getByRole('button', { name: '功能与模式', exact: true })).toContainText('计划 Plan');
+  await expect(input).toHaveValue('保留草稿');
+  await page.getByRole('button', { name: '发送消息', exact: true }).click();
+  await expect.poll(() => fixture.calls.find((call) => call.method === 'sessions/send')?.params.mode).toBe('plan');
+  await page.getByRole('button', { name: '进入执行', exact: true }).click();
+  await page.getByRole('button', { name: '功能与模式', exact: true }).click();
+  await page.getByRole('textbox', { name: '目标内容', exact: true }).fill('完成手机目标');
+  await page.getByRole('textbox', { name: '目标 token 预算', exact: true }).fill('1200');
+  await page.getByRole('button', { name: '创建目标', exact: true }).click();
+  await expect(page.getByText('目标模式 Goal · 进行中', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '暂停目标', exact: true }).click();
+  await expect(page.getByText('目标模式 Goal · 已暂停', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '继续目标', exact: true }).click();
+  await expect(page.getByText('目标模式 Goal · 进行中', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '结束目标', exact: true }).click();
+  await expect(page.getByText('目标模式 Goal · 已完成', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '关闭功能面板', exact: true }).click();
+  for (const width of [320, 390, 820]) {
+    await page.setViewportSize({ width, height: 844 });
+    const boxes = await Promise.all(['model', 'effort', 'permission'].map((name) => page.getByTestId(`${name}-picker`).boundingBox()));
+    expect(Math.max(...boxes.map((box) => box!.y)) - Math.min(...boxes.map((box) => box!.y))).toBeLessThan(1);
+    expect(boxes[2]!.x + boxes[2]!.width).toBeLessThanOrEqual(width);
+    await expect(page.getByRole('button', { name: '发送消息', exact: true })).toBeVisible();
+    await page.screenshot({ path: `artifacts/mobile-issues-${width}.png`, animations: 'disabled' });
+  }
+  await page.screenshot({ path: 'artifacts/mobile-issues-chat.png', animations: 'disabled' });
+});
 const fullPermissions: SessionPermissions = {
   mode: 'full-access', approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' }, approvalsReviewer: 'user', profile: null,
 };
@@ -73,6 +130,8 @@ async function connectFixture(page: Page, large = false) {
   let sequence = 0;
   const archives = new Set<string>();
   const settingsByThread = new Map<string, { model: string; reasoningEffort: string; permissions: SessionPermissions }>();
+  const modes = new Map<string, string>();
+  const goals = new Map<string, any>();
   await page.routeWebSocket('**/ws', (socket) => {
     sockets.push(socket);
     socket.onMessage((raw) => {
@@ -102,10 +161,12 @@ async function connectFixture(page: Page, large = false) {
         case 'sessions/read': {
           const selected = [...projects.flatMap((p) => p.sessions), ...recentSessions.map((entry) => entry.session)].find((item) => item.id === message.params.threadId)!;
           const settings = settingsByThread.get(message.params.threadId) ?? { model: 'model-a', reasoningEffort: 'medium', permissions: fullPermissions };
-          result = { session: selected, ...settings, items: [{ id: 'markdown', turnId: 'fixture-turn', kind: 'assistant', text: markdown, timestamp: 1000 }], nextCursor: null, activeTurnId: null, requests: [], sequence };
+          result = { session: selected, ...settings, mode: modes.get(selected.id) ?? 'default', goal: goals.get(selected.id) ?? null,
+            capabilities: { plan: true, goal: true, goalBudget: true }, items: [{ id: 'markdown', turnId: 'fixture-turn', kind: 'assistant', text: markdown, timestamp: 1000 }], nextCursor: null, activeTurnId: null, requests: [], sequence };
           break;
         }
         case 'sessions/send':
+          if (message.params.mode) modes.set(message.params.threadId, message.params.mode);
           settingsByThread.set(message.params.threadId, {
             model: message.params.model ?? 'model-a', reasoningEffort: message.params.effort ?? 'medium',
             permissions: message.params.permissionMode === 'approval' ? approvalPermissions : fullPermissions,
@@ -116,6 +177,27 @@ async function connectFixture(page: Page, large = false) {
             socket.send(JSON.stringify({ type: 'event', method: 'session/status', deviceId: message.deviceId, params: { threadId: message.params.threadId, turnId: 'sent-turn', status: 'completed', sequence: ++sequence } }));
           }, 30);
           break;
+        case 'sessions/create': {
+          const project = projects.find((p) => p.id === message.params.projectId && p.deviceId === message.deviceId)!;
+          const created = session(`created-${calls.length}`, project.id, '新会话');
+          project.sessions.unshift(created); result = { session: created }; break;
+        }
+        case 'sessions/rename': {
+          const selected = [...projects.flatMap((p) => p.sessions), ...recentSessions.map((entry) => entry.session)].find((item) => item.id === message.params.threadId)!;
+          selected.name = message.params.name; result = {}; break;
+        }
+        case 'sessions/fork': {
+          const source = [...projects.flatMap((p) => p.sessions), ...recentSessions.map((entry) => entry.session)].find((item) => item.id === message.params.threadId)!;
+          const fork = { ...source, id: `fork-${calls.length}`, name: `${source.name} · 分支`, forkedFromId: source.id };
+          projects.find((p) => p.id === source.projectId)?.sessions.unshift(fork); result = { session: fork }; break;
+        }
+        case 'sessions/goal/set': {
+          const goal = { threadId: message.params.threadId, tokensUsed: 0, timeUsedSeconds: 0, tokenBudget: null, status: 'active',
+            ...goals.get(message.params.threadId), ...message.params };
+          goals.set(message.params.threadId, goal); result = { goal }; break;
+        }
+        case 'sessions/goal/clear': goals.delete(message.params.threadId); result = { goal: null }; break;
+        case 'attachments/upload': result = { file: { id: `file-${calls.length}`, name: message.params.name, mimeType: message.params.mimeType, size: 64 } }; break;
         case 'sessions/archive': archives.add(`${message.deviceId}:${message.params.threadId}`); result = {}; break;
         case 'sessions/unarchive': archives.delete(`${message.deviceId}:${message.params.threadId}`); result = {}; break;
         case 'directories/list': result = { path: message.params.path || '/', parent: null, directories: [{ name: 'workspace', path: '/workspace' }] }; break;

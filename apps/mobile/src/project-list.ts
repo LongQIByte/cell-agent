@@ -9,6 +9,7 @@ export interface ProjectSection {
   expanded: boolean;
   total: number;
   data: RecentSession[];
+  pinned?: boolean;
 }
 
 export function projectKey(project: Project) {
@@ -33,16 +34,23 @@ export function projectSections(
 ): ProjectSection[] {
   const needle = query.trim().toLocaleLowerCase();
   const sections: ProjectSection[] = [];
+  const pinned = new Map<string, RecentSession>();
+  const collect = (entry: RecentSession) => {
+    const key = sessionPinKey(entry.deviceId, entry.session.id);
+    if (pins.has(key)) { pinned.set(key, entry); return false; }
+    return true;
+  };
   const recent = pinnedFirst(recentSessions
     .filter(({ session }) => !needle || `${session.name} ${session.cwd}`.toLocaleLowerCase().includes(needle))
     .sort((a, b) => b.session.updatedAt - a.session.updatedAt),
-  ({ deviceId, session }) => pins.has(sessionPinKey(deviceId, session.id)));
+  ({ deviceId, session }) => pins.has(sessionPinKey(deviceId, session.id))).filter(collect);
   for (const project of [...projects].sort((a, b) => b.updatedAt - a.updatedAt)) {
     const matchesProject = !needle || `${project.name} ${project.path}`.toLocaleLowerCase().includes(needle);
     const sessions = pinnedFirst(matchesProject
       ? project.sessions
       : project.sessions.filter((session) => `${session.name} ${session.cwd}`.toLocaleLowerCase().includes(needle)),
-    (session) => pins.has(sessionPinKey(project.deviceId, session.id)));
+    (session) => pins.has(sessionPinKey(project.deviceId, session.id)))
+      .filter((session) => collect({ deviceId: project.deviceId, session }));
     if (!matchesProject && !sessions.length) continue;
     const key = `${prefix}:${projectKey(project)}`;
     const expanded = !!needle || !collapsed.has(key);
@@ -58,5 +66,7 @@ export function projectSections(
   if (recent.length) {
     sections.push({ key: `${prefix}:recent`, project: null, expanded: true, total: recent.length, data: recent });
   }
+  if (pinned.size) sections.unshift({ key: `${prefix}:pinned`, project: null, pinned: true,
+    expanded: true, total: pinned.size, data: [...pinned.values()].sort((a, b) => b.session.updatedAt - a.session.updatedAt) });
   return sections;
 }

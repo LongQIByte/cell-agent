@@ -16,12 +16,15 @@ import {
   type JsonRecord,
   type CodexRequest,
   type SessionHistory,
+  type SessionGoal,
+  type SessionCapabilities,
 } from '@codex-remote/protocol';
 import { CodexRpc } from './codex.js';
 import { AgentStore } from './store.js';
 import { sessionFrom, normalizeItem, mergeItems } from './normalize.js';
 import { readDesktopMembership, desktopSession } from './desktop-membership.js';
 import { settingsFromNotification, settingsFromResume, permissionPreset, type SessionSettings } from './session-settings.js';
+import { assistantOutput, beginMetrics, updateTokenUsage, type MetricsSnapshot } from './run-metrics.js';
 
 interface Catalogue {
   projects: Project[];
@@ -41,6 +44,34 @@ export class AgentService extends EventEmitter {
   private runtime = new Map<string, ChatItem[]>();
   private settings = new Map<string, SessionSettings>();
   private sending = new Set<string>();
+  private metrics = new Map<string, MetricsSnapshot>();
+  private modes = new Map<string, 'default' | 'plan'>();
+  private goals = new Map<string, SessionGoal | null>();
+  private planCapability?: Promise<{ plan: boolean; planReason?: string }>;
+  private metricSnapshot(threadId: string) {
+    const value = this.metrics.get(threadId) ?? this.store.metrics<MetricsSnapshot>(threadId);
+    if (value) this.metrics.set(threadId, value);
+    return value;
+  }
+  private publishMetrics(threadId: string) {
+    const snapshot = this.metricSnapshot(threadId);
+    if (!snapshot) return;
+    this.store.saveMetrics(threadId, snapshot);
+    this.publish('session/metrics', { threadId, metrics: snapshot.metrics });
+  }
+  private async capabilities(threadId: string): Promise<SessionCapabilities> {
+    this.planCapability ??= this.codex.call('collaborationMode/list', {}).then((result) => ({
+      plan: result.data.some((entry: any) => entry.mode === 'plan'),
+    })).catch((error: Error) => ({ plan: false, planReason: error.message }));
+    const plan = await this.planCapability;
+    try {
+      const { goal } = await this.codex.call('thread/goal/get', { threadId });
+      this.goals.set(threadId, goal);
+      return { ...plan, goal: true, goalBudget: true };
+    } catch (error) {
+      return { ...plan, goal: false, goalBudget: false, goalReason: (error as Error).message };
+    }
+  }
   private pendingRequests = new Map<
     string,
     {
@@ -95,6 +126,7 @@ export class AgentService extends EventEmitter {
       method === 'thread/project/updated' ||
       method === 'project/changed'
     ) {
+      if (method === 'thread/name/updated' && typeof params.threadName === 'string') this.publish('session/name', { threadId, name: params.threadName });
       this.publish('catalog/changed', {});
       return;
     }
@@ -103,6 +135,11 @@ export class AgentService extends EventEmitter {
         const settings = settingsFromNotification(params.threadSettings);
         this.settings.set(threadId, settings);
         this.publish('session/settings', { threadId, ...settings });
+        const mode = params.threadSettings.collaborationMode?.mode;
+        if (mode === 'plan' || mode === 'default') {
+          this.modes.set(threadId, mode);
+          this.publish('session/mode', { threadId, mode });
+        }
       } catch (error) {
         this.upsert(threadId, {
           id: 'settings-error', turnId: this.active.get(threadId) ?? '', kind: 'error',
@@ -117,15 +154,56 @@ export class AgentService extends EventEmitter {
           clearTimeout(pending.timer);
           this.pendingRequests.delete(id);
           this.publish('session/requestResolved', { threadId: pending.threadId, requestId: id });
+          const snapshot = this.metricSnapshot(pending.threadId);
+          if (snapshot && !snapshot.metrics.endedAt) {
+            snapshot.metrics.status = 'waiting';
+            this.publishMetrics(pending.threadId);
+          }
         }
       return;
     }
     if (!threadId) return;
+    if (method === 'thread/goal/updated' || method === 'thread/goal/cleared') {
+      const goal = method.endsWith('cleared') ? null : params.goal;
+      this.goals.set(threadId, goal);
+      this.publish('session/goal', { threadId, goal });
+      return;
+    }
+    if (method === 'thread/compacted') {
+      const snapshot = this.metricSnapshot(threadId);
+      if (snapshot) {
+        snapshot.metrics.contextUsed = null;
+        this.publishMetrics(threadId);
+      }
+      return;
+    }
+    if (method === 'thread/tokenUsage/updated') {
+      let snapshot = this.metricSnapshot(threadId);
+      if (!snapshot || snapshot.metrics.turnId !== params.turnId) {
+        // Late notifications for an older turn must never reset an active turn.
+        if (this.active.has(threadId) && this.active.get(threadId) !== params.turnId) return;
+        snapshot = beginMetrics(params.turnId, snapshot);
+        this.metrics.set(threadId, snapshot);
+      }
+      updateTokenUsage(snapshot, params.tokenUsage);
+      this.publishMetrics(threadId);
+      return;
+    }
     if (method === 'turn/started') {
+      const previous = this.metricSnapshot(threadId);
+      if (previous?.metrics.turnId !== params.turn.id)
+        this.metrics.set(threadId, beginMetrics(params.turn.id, previous));
+      this.publishMetrics(threadId);
       this.active.set(threadId, params.turn.id);
       this.runtime.set(threadId, []);
       this.publish('session/status', { threadId, turnId: params.turn.id, status: 'inProgress' });
     } else if (method === 'turn/completed') {
+      const snapshot = this.metricSnapshot(threadId);
+      if (snapshot && snapshot.metrics.turnId === params.turn.id) {
+        snapshot.metrics.status = params.turn.status === 'interrupted' ? 'stopped' : params.turn.status === 'failed' ? 'failed' : 'completed';
+        snapshot.metrics.endedAt = Date.now();
+        this.publishMetrics(threadId);
+      }
       this.active.delete(threadId);
       for (const [id, pending] of this.pendingRequests)
         if (pending.threadId === threadId) {
@@ -149,7 +227,14 @@ export class AgentService extends EventEmitter {
       this.publish('catalog/changed', {});
     } else if (method === 'item/started' || method === 'item/completed') {
       const item = this.normalize(params.item, params.turnId);
+      if (item) item.status ??= method === 'item/started' ? 'inProgress' : 'completed';
       if (item) this.upsert(threadId, item);
+      const snapshot = this.metricSnapshot(threadId);
+      if (snapshot && snapshot.metrics.turnId === params.turnId) {
+        if (item && (item.kind === 'assistant' || params.item.type === 'plan')) assistantOutput(snapshot, item.id, item.text);
+        else if (!snapshot.metrics.endedAt && params.item.type !== 'userMessage') snapshot.metrics.status = method === 'item/started' ? 'tool' : 'waiting';
+        this.publishMetrics(threadId);
+      }
     } else if (
       method === 'item/agentMessage/delta' ||
       method === 'item/commandExecution/outputDelta' ||
@@ -186,6 +271,11 @@ export class AgentService extends EventEmitter {
         delta: params.delta,
         value: updated[field],
       });
+      const snapshot = this.metricSnapshot(threadId);
+      if ((kind === 'assistant' || method === 'item/plan/delta') && snapshot && snapshot.metrics.turnId === params.turnId) {
+        assistantOutput(snapshot, params.itemId, updated.text);
+        this.publishMetrics(threadId);
+      }
     } else if (method === 'error') {
       this.upsert(threadId, {
         id: `error-${params.turnId ?? 'runtime'}`,
@@ -236,6 +326,11 @@ export class AgentService extends EventEmitter {
       30 * 60 * 1000,
     );
     this.pendingRequests.set(id, { rawId: message.id, threadId, request, timer });
+    const snapshot = this.metricSnapshot(threadId);
+    if (snapshot && !snapshot.metrics.endedAt) {
+      snapshot.metrics.status = 'confirmation';
+      this.publishMetrics(threadId);
+    }
     this.publish('session/request', { threadId, request });
   }
   private respondToRequest(id: string, action: string, answers?: unknown) {
@@ -266,6 +361,11 @@ export class AgentService extends EventEmitter {
     this.codex.respond(pending.rawId, result);
     clearTimeout(pending.timer);
     this.pendingRequests.delete(id);
+    const snapshot = this.metricSnapshot(pending.threadId);
+    if (snapshot && !snapshot.metrics.endedAt) {
+      snapshot.metrics.status = 'waiting';
+      this.publishMetrics(pending.threadId);
+    }
     this.publish('session/requestResolved', { threadId: pending.threadId, requestId: id });
     return { ok: true };
   }
@@ -402,6 +502,8 @@ export class AgentService extends EventEmitter {
     try {
       const resumed = await this.codex.call('thread/resume', { threadId, excludeTurns: true });
       settings = settingsFromResume(resumed);
+      const mode = resumed.collaborationMode?.mode;
+      if (mode === 'plan' || mode === 'default') this.modes.set(threadId, mode);
       this.settings.set(threadId, settings);
     } catch (error) {
       if (!(error instanceof RemoteError) || error.code !== 'CODEX_-32600' ||
@@ -440,6 +542,19 @@ export class AgentService extends EventEmitter {
     // the latest native notification with the sequence acknowledged below.
     settings = this.settings.get(threadId) ?? settings;
     if (settings) permissionsUnavailableReason = undefined;
+    const capabilities = await this.capabilities(threadId);
+    const latestTurn = turns.at(-1);
+    const activeTurn = turns.find((turn) => turn.status === 'inProgress');
+    if (!cursor && activeTurn && !this.active.has(threadId)) this.active.set(threadId, activeTurn.id);
+    const savedMetrics = this.metricSnapshot(threadId);
+    if (!cursor && latestTurn && savedMetrics?.metrics.turnId !== latestTurn.id &&
+        (!this.active.has(threadId) || this.active.get(threadId) === latestTurn.id)) {
+      const snapshot = beginMetrics(latestTurn.id, savedMetrics, latestTurn.startedAt ? latestTurn.startedAt * 1000 : session.updatedAt);
+      snapshot.metrics.status = latestTurn.status === 'inProgress' ? 'waiting' : latestTurn.status === 'failed' ? 'failed' : latestTurn.status === 'interrupted' ? 'stopped' : 'completed';
+      snapshot.metrics.endedAt = latestTurn.status === 'inProgress' ? null : latestTurn.completedAt ? latestTurn.completedAt * 1000 : session.updatedAt;
+      this.metrics.set(threadId, snapshot);
+      this.store.saveMetrics(threadId, snapshot);
+    }
     return {
       session,
       model: settings?.model ?? thread.model ?? null,
@@ -454,6 +569,10 @@ export class AgentService extends EventEmitter {
         .filter((r) => r.threadId === threadId)
         .map((r) => r.request),
       sequence: this.sequence,
+      mode: this.modes.get(threadId) ?? 'default',
+      goal: this.goals.get(threadId) ?? null,
+      capabilities,
+      metrics: this.metricSnapshot(threadId)?.metrics.turnId ? this.metricSnapshot(threadId)!.metrics : null,
     };
   }
   async handle(method: string, raw: JsonRecord): Promise<unknown> {
@@ -463,6 +582,43 @@ export class AgentService extends EventEmitter {
       return this.catalogue(archived);
     }
     if (method === 'models/list') return { models: await this.models() };
+    if (method === 'sessions/rename') {
+      const p = z.object({ threadId: idSchema, name: z.string().trim().min(1).max(100) }).parse(raw);
+      const { thread } = await this.codex.call('thread/read', { threadId: p.threadId });
+      await this.localSession(thread);
+      await this.codex.call('thread/name/set', p);
+      this.publish('session/name', { threadId: p.threadId, name: p.name });
+      this.publish('catalog/changed', {});
+      return {};
+    }
+    if (method === 'sessions/fork') {
+      const { threadId } = z.object({ threadId: idSchema }).parse(raw);
+      const { thread: source } = await this.codex.call('thread/read', { threadId });
+      const original = await this.localSession(source);
+      if (this.active.has(threadId) || source.status?.type === 'active')
+        throw new RemoteError('TURN_ACTIVE', '请等待当前任务完成或停止后创建分支');
+      const forked = await this.codex.call('thread/fork', { threadId, excludeTurns: true, deferGoalContinuation: true });
+      // Project assignment is canonical metadata, never inferred from cwd.
+      if (forked.thread.projectId !== source.projectId)
+        throw new RemoteError('PROJECT_METADATA_UNAVAILABLE', 'Codex 分支未保留原生项目归属，请刷新电脑端项目数据');
+      const name = `${original.name.slice(0, 90)} · 分支`;
+      await this.codex.call('thread/name/set', { threadId: forked.thread.id, name });
+      this.settings.set(forked.thread.id, settingsFromResume(forked));
+      this.publish('catalog/changed', {});
+      return { session: { ...sessionFrom(forked.thread), name } };
+    }
+    if (method === 'sessions/goal/set' || method === 'sessions/goal/clear') {
+      const p = z.object({ threadId: idSchema, objective: z.string().trim().min(1).max(20000).optional(),
+        status: z.enum(['active', 'paused', 'complete']).optional(),
+        tokenBudget: z.number().int().positive().nullable().optional() }).parse(raw);
+      const { thread } = await this.codex.call('thread/read', { threadId: p.threadId });
+      await this.localSession(thread);
+      const result = await this.codex.call(method === 'sessions/goal/set' ? 'thread/goal/set' : 'thread/goal/clear', { ...p, origin: 'user' });
+      const goal = method.endsWith('clear') ? null : result.goal;
+      this.goals.set(p.threadId, goal);
+      this.publish('session/goal', { threadId: p.threadId, goal });
+      return { goal };
+    }
     if (method === 'sessions/archive' || method === 'sessions/unarchive') {
       const { threadId } = z.object({ threadId: idSchema }).parse(raw);
       await this.codex.call(method === 'sessions/archive' ? 'thread/archive' : 'thread/unarchive', { threadId });
@@ -560,6 +716,10 @@ export class AgentService extends EventEmitter {
         runtimeWorkspaceRoots: project.roots.map((root) => root.path),
       });
       const { thread } = started;
+      const initialMetrics = beginMetrics('', null);
+      initialMetrics.total = { totalTokens: 0, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, reasoningOutputTokens: 0 };
+      this.metrics.set(thread.id, initialMetrics);
+      this.store.saveMetrics(thread.id, initialMetrics);
       this.settings.set(thread.id, settingsFromResume(started));
       const name = p.name || '新会话';
       await this.codex.call('thread/name/set', { threadId: thread.id, name });
@@ -576,6 +736,7 @@ export class AgentService extends EventEmitter {
           model: z.string().trim().min(1).max(150).optional(),
           effort: z.string().trim().min(1).max(100).optional(),
           permissionMode: z.enum(['full-access', 'approval']).optional(),
+          mode: z.enum(['default', 'plan']).optional(),
         })
         .parse(raw);
       if (!p.text && !p.attachmentIds.length)
@@ -634,6 +795,9 @@ export class AgentService extends EventEmitter {
         const permissions = p.permissionMode
           ? permissionPreset(p.permissionMode, resumed.runtimeWorkspaceRoots)
           : {};
+        const mode = p.mode ?? this.modes.get(p.threadId) ?? resumed.collaborationMode?.mode ?? 'default';
+        if (mode === 'plan' && !(await this.capabilities(p.threadId)).plan)
+          throw new RemoteError('CODEX_UNSUPPORTED_API', '当前 Codex 不支持计划模式');
         this.store.beginRequest(p.idempotencyKey, p.threadId);
         began = true;
         const { turn } = await this.codex.call('turn/start', {
@@ -643,7 +807,11 @@ export class AgentService extends EventEmitter {
           ...(p.model ? { model: p.model } : {}),
           ...(effort ? { effort } : {}),
           ...permissions,
+          collaborationMode: { mode, settings: { model: p.model ?? settings.model,
+            reasoning_effort: effort ?? settings.reasoningEffort, developer_instructions: null } },
         });
+        this.modes.set(p.threadId, mode);
+        this.publish('session/mode', { threadId: p.threadId, mode });
         const result = { turnId: turn.id };
         this.store.finishRequest(p.idempotencyKey, result);
         if (!thread.name || thread.name === '新会话')
