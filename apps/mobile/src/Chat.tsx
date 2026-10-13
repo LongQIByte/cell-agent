@@ -4,7 +4,6 @@ import {
   AppState,
   Modal,
   Keyboard,
-  KeyboardAvoidingView,
   Platform,
   Pressable,
   ScrollView,
@@ -13,6 +12,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
 import * as DocumentPicker from 'expo-document-picker';
@@ -752,10 +752,9 @@ export function Chat({
   return (
     <KeyboardAvoidingView
       style={styles.chat}
-      // Android's resize window owns IME insets; a second height adjustment
-      // uses parent-relative coordinates and can clip or double-shift the composer.
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      enabled={Platform.OS === 'ios'}
+      // Native IME insets drive this layout, including edge-to-edge Android.
+      behavior="padding"
+      enabled={Platform.OS !== 'web'}
       testID="chat-screen"
     >
       <View style={styles.historyArea}>

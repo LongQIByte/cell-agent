@@ -14,6 +14,7 @@ import {
   View,
   useWindowDimensions,
 } from 'react-native';
+import { KeyboardProvider } from 'react-native-keyboard-controller';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import type { Device, Project, RecentSession, Session } from '@codex-remote/protocol';
@@ -547,11 +548,13 @@ function Main() {
 }
 export default function App() {
   return (
+    <KeyboardProvider>
     <SafeAreaProvider>
       <UIProvider>
         <Main />
       </UIProvider>
     </SafeAreaProvider>
+    </KeyboardProvider>
   );
 }
 const createStyles = (palette: Palette) => StyleSheet.create({
