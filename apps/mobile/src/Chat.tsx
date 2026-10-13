@@ -878,7 +878,7 @@ export function Chat({
       }}>
         <View style={styles.recentOverlay}><View style={styles.recentPanel}>
           <Text style={styles.promptTitle}>检测到近期图片，是否添加到当前会话的附件？</Text>
-          <Text style={styles.promptDescription}>相册中最近 5 分钟的 {recent.length} 张图片。确认后添加附件，不发送消息。</Text>
+          <Text style={styles.promptDescription}>相册中最近 5 分钟拍摄或修改的 {recent.length} 张图片。确认后添加附件，不发送消息。</Text>
           <Button label="添加近期图片" disabled={uploading || sending || !online} onPress={() => void addRecent()} />
           <Button label="忽略近期图片" subtle disabled={uploading} onPress={() => {
             void handleRecentImages(recent).then(() => setRecent([])).catch((e: Error) => setError(e.message));

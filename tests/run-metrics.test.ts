@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { assistantOutput, beginMetrics, updateTokenUsage } from '../apps/agent/src/run-metrics.js';
-import { recentImages, RECENT_IMAGE_WINDOW_MS } from '../apps/mobile/src/recent-image-state.js';
+import { recentImages, recentImageTime, RECENT_IMAGE_WINDOW_MS } from '../apps/mobile/src/recent-image-state.js';
 
 const tokens = (input: number, output: number, cached = 0) => ({ inputTokens: input, outputTokens: output, cachedInputTokens: cached, totalTokens: input + output, reasoningOutputTokens: 0 });
 test('turn usage is a baseline difference while context uses the latest request, including after compaction', () => {
@@ -38,4 +38,11 @@ test('recent photo discovery excludes old, future, handled images and caps promp
   const images = [photo('old', now - RECENT_IMAGE_WINDOW_MS - 1), photo('future', now + 1), photo('ignored'), ...Array.from({ length: 8 }, (_, i) => photo(String(i)))];
   assert.deepEqual(recentImages(images, ['ignored', '2'], now).map((image) => image.id), ['0', '1', '3', '4', '5', '6']);
   assert.deepEqual(recentImages([], [], now), []);
+});
+test('imported photos without capture metadata and recently edited photos use valid modification time', () => {
+  const now = 1000000;
+  assert.equal(recentImageTime({ creationTime: 0, modificationTime: now - 1 }, now), now - 1);
+  assert.equal(recentImageTime({ creationTime: now - 500000, modificationTime: now - 1 }, now), now - 1);
+  assert.equal(recentImageTime({ creationTime: now + 10000, modificationTime: now - 1 }, now), now - 1);
+  assert.equal(recentImageTime({ creationTime: NaN }, now), 0);
 });

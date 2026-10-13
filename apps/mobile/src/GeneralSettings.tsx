@@ -75,7 +75,7 @@ export function GeneralSettings() {
       <View style={styles.setting}>
         <Text style={styles.label}>其他配置信息</Text>
         {Platform.OS !== 'web' && <>
-          <Text style={styles.help}>近期图片：授权后，返回会话时提示添加相册中最近 5 分钟的图片。仅在确认后上传，不自动发送。</Text>
+          <Text style={styles.help}>近期图片：授权后，返回会话时提示添加相册中最近 5 分钟拍摄或修改的图片。仅在确认后上传，不自动发送。</Text>
           <Button label="允许检测近期图片" subtle onPress={() => {
             void allowRecentImages().then((allowed) => setPhotoStatus(allowed ? '已允许，请返回会话查看近期图片' : '未授权，仍可手动添加附件')).catch((e: Error) => setPhotoStatus(e.message));
           }} />
