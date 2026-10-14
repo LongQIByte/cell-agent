@@ -1,0 +1,80 @@
+# 开发、构建与验证
+
+## Android APK
+
+### 局域网手机开发调试（Fast Refresh）
+
+想在电脑保存代码后立刻看到手机界面变化，使用开发版 APK。首次编译一次：
+
+```bash
+npm run android:build:dev
+npm run dev
+```
+
+输出 `artifacts/codex-remote-dev.apk`（ARM64），手机与电脑连接同一 Wi-Fi，在手机浏览器打开终端显示的 Development APK 地址下载、安装。开发版名称为 **Codex Remote Dev**，可与正式版共存。打开开发版，在 Expo launcher 输入终端显示的 Metro 地址 `http://电脑IP:8081`，或扫描终端二维码 / `.local/dev-client.png`。进入 Settings 后使用原有服务地址和配对密钥连接电脑。
+
+手机已通过 USB 连接并允许 USB 调试时，在另一个终端运行：
+
+```bash
+npm run android:dev:open
+```
+
+这条命令安装开发版并直接打开局域网开发地址。`adb` 需要在 PATH 中，或设置 `ANDROID_HOME`；多台设备时用 `ANDROID_SERIAL` 选择手机。日常只需保持 `npm run dev` 运行，修改并保存 JS/TS、组件和样式后手机通过 Fast Refresh 自动刷新，通常保留组件状态；某些修改会触发整页重载。无需 Expo 登录、发布更新包或重新跑 Gradle。也可按 Expo 终端的 `w` 打开浏览器开发版。
+
+电脑防火墙需要允许局域网访问 TCP **8081**（Metro）和 **8787**（Relay；配置过其他端口时用该端口）。`npm run dev` 会复用已保存的 Relay 端口，也可用 `RELAY_PORT` 覆盖。WSL 还需要转发这两个端口，运行下述更新后的 Windows LAN 脚本；自定义端口时例如 `-Ports 8788,8081`。若电脑 IP 改变，重新启动服务并在 launcher 选择新的 Metro 地址。安装/升级原生库、修改 app config 或升级 Expo 时，重新运行 `npm run android:build:dev` 并安装。开发版运行依赖电脑上的 Metro；需要脱离开发服务器使用时，安装下面的正式版 APK。
+
+### 正式版 APK
+
+已构建的个人测试 APK 可从 [GitHub Release v0.1.0](https://github.com/LongQIByte/cell-agent/releases/tag/v0.1.0) 下载，附有 SHA-256 校验文件。
+
+需要 JDK 17+、Android SDK 平台 36 / build-tools 36.0.0、NDK 27，以及 CMake / Ninja。环境准备后：
+
+```bash
+npm run android:build
+```
+
+输出 `artifacts/codex-remote.apk`。这是 release 构建、带完整 JS 的**个人测试 APK**，使用开发签名。默认包含 arm64-v8a / armeabi-v7a，兼容 Android 7+。`scripts/build-android.sh` 支持 `ANDROID_HOME` / `JAVA_HOME`，以及可选的 `CODEX_REMOTE_CMAKE_DIR` 和 `CODEX_REMOTE_GRADLE_INIT`。
+
+构建下载可单独使用 HTTP 代理，不改变手机或系统的代理设置。例如本机已有 `127.0.0.1:17890` 时：
+
+```bash
+CODEX_REMOTE_PROXY_PORT=17890 npm run android:build
+```
+
+其他代理主机可设置 `CODEX_REMOTE_PROXY_HOST`。
+
+`apps/mobile/android/` 是 Expo prebuild 产物，不提交。iOS 架构和界面已兼容，但构建需要 macOS / Xcode，尚未进行 iOS 真机验证。
+
+Google 下载站不可达时，可用 `python3 scripts/fetch-android-sdk.py` 从固定版本的 Cirrus Labs 公共 OCI 镜像提取 Linux SDK（平台 36、build-tools 36.0.0、NDK 27.3），逐层校验 SHA-256。默认保存到 `~/.cache/codex-remote-tools/android-sdk/`。可通过 `CODEX_REMOTE_DOWNLOAD_WORKERS` 调整分段下载并发。对应构建设置 `CODEX_REMOTE_NDK_VERSION=27.3.13750724` 和 `CODEX_REMOTE_GRADLE_INIT` 指向 `scripts/android-mirrors.gradle`。JDK / CMake 仍需安装。
+
+如果 SDK、JDK、CMake 安装在 `~/.cache/codex-remote-tools/`，可在项目根目录按以下示例构建：
+
+```bash
+CODEX_REMOTE_PROXY_PORT=17890 \
+CODEX_REMOTE_NDK_VERSION=27.3.13750724 \
+CODEX_REMOTE_CMAKE_DIR="$HOME/.cache/codex-remote-tools/cmake-python/cmake/data" \
+CODEX_REMOTE_GRADLE_INIT="$PWD/scripts/android-mirrors.gradle" \
+npm run android:build
+```
+
+## 验证
+
+```bash
+npm run typecheck
+npm test
+npm run test:browser   # 先启动 npm start；会调用本机真实 Codex
+```
+
+浏览器测试使用 `.local/browser-workspace/`，覆盖配对错误、原生会话发现、项目折叠、新建项目 / 会话、真实命令执行、流式输出、页面刷新后的原生会话继续、文件附件、直板和折叠屏布局。测试前需在本仓库目录已有原生 Codex 会话，以验证原生会话发现。测试会创建原生 Codex 测试会话；截图生成在 `artifacts/`，不纳入版本控制。
+
+本机测试结果、APK 信息和校验值见 [验证记录](../artifacts/validation.md)。
+
+## 当前范围
+
+项目归属使用 Codex 原生 project API 的项目定义，并仅读取本机桌面明确记录的归属 metadata；不按工作目录推断归属，也不写迁移数据。当前客户端使用通信协议 3；旧正式 APK 需要重新安装新版，开发 APK 可通过 Metro 加载新的 JavaScript。
+
+支持读取并继续这台机器保存的原生会话。Agent 启动一个独立的官方 App Server，流式事件覆盖通过该 Agent 执行的任务；其他桌面客户端独立运行的任务通过历史刷新查看，不承诺其跨进程实时事件。为保持会话记录一致，应避免桌面和手机同时向同一个会话发起任务。
+
+通用 MCP 表单 / URL 授权目前可在手机取消，需要在电脑完成；尚未实现语音、后台推送、远程桌面或完整 diff 编辑器。这些不影响局域网的文本开发任务和原生会话复用。
+
+协议依据：[官方 Codex App Server 文档](https://learn.chatgpt.com/docs/app-server)。本机验证版本：`codex-cli 0.162.0-alpha.17.2`；CLI 协议可能变化，可通过 `codex app-server generate-ts --out /tmp/codex-schema` 获取本机对应类型。

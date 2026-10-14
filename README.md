@@ -25,7 +25,9 @@ Android 安装包：[下载 Release](https://github.com/LongQIByte/cell-agent/re
 ## 更多说明
 
 - [电脑服务：启动、停止、状态与管理页](service/使用说明.md)
-- [使用与开发手册：WSL、其他电脑、部署、Android 构建及开发调试](docs/usage-and-development.md)
+- [连接与部署](docs/connection.md)
+- [开发、构建与验证](docs/development.md)
+- [后端部署与远程连接](docs/service-deployment.md)
 - [移动端功能与指标说明](docs/mobile-features.md)
 - [验证记录](artifacts/validation.md)
 

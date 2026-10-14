@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 export const MAX_FILE_BYTES = 8 * 1024 * 1024;
 export const MAX_WIRE_BYTES = 12 * 1024 * 1024;
 export type JsonRecord = Record<string, unknown>;
