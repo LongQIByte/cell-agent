@@ -44,6 +44,15 @@ systemctl --user restart cell-agent-personal
 
 ## Windows 与 WSL
 
+Windows 原生 PowerShell 可运行 `deploy/install-windows-service.ps1`，更新已有服务并创建当前用户的登录任务。默认服务目录为当前用户的 `CodexRemote9002/codex-remote-service`；通过 `-ServiceRoot`、`-PublicUrl` 可以明确指定。脚本保留 `.local` 配对与数据库，将验证版本 Codex 安装到独立用户目录。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy/install-windows-service.ps1
+```
+
+本次 Windows/WSL SSH 通道不可用，该脚本尚未在原机器运行验证，不代表 Windows 部署已完成。
+
+
 Windows Agent 处理 Windows 项目；WSL 项目由对应发行版中的 Linux Agent 处理。Windows 的 `\\wsl.localhost\Ubuntu\...` 路径不具备普通 NTFS ACL 语义；已观察到 Windows sandbox 在这些路径上报 `GetSecurityInfo failed`，随后返回 `setup refresh had errors`。
 
 `windows-runtime-diagnostics.ps1` 会报告真实账号、项目路径、PowerShell、最新日期日志及 setup 错误。保留执行权限；不要通过关闭沙盒替代对原环境的修复。必须在原故障会话成功读取、可逆修改并恢复执行，才能关闭相关 issue。

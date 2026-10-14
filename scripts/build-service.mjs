@@ -26,6 +26,11 @@ export async function buildService(destination, webDirectory) {
   }
   cpSync(webDirectory, resolve(destination, 'apps/mobile/dist'), { recursive: true });
   cpSync(resolve(root, 'service'), resolve(destination, 'service'), { recursive: true });
+  mkdirSync(resolve(destination, 'deploy'), { recursive: true });
+  for (const name of ['install-linux-service.sh', 'install-windows-service.ps1', 'setup-windows-lan.ps1', 'remove-windows-lan.ps1'])
+    cpSync(resolve(root, 'deploy', name), resolve(destination, 'deploy', name));
+  cpSync(resolve(root, 'scripts/windows-runtime-diagnostics.ps1'), resolve(destination, 'scripts/windows-runtime-diagnostics.ps1'));
+  chmodSync(resolve(destination, 'deploy/install-linux-service.sh'), 0o755);
   for (const name of ['Start-Mac.command', 'Start-Linux.sh', 'Start-Windows.cmd']) {
     const file = resolve(destination, 'service', name);
     writeFileSync(file, readFileSync(file, 'utf8').replaceAll('node --import tsx ', 'node '));

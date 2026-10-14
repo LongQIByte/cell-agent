@@ -37,3 +37,16 @@ test('large files transfer in bounded chunks with exact binary content, cancella
     await assert.rejects(files.create('.', root), /普通文件/);
   } finally { files.close(); await rm(root, { recursive: true, force: true }); }
 });
+
+test('WSL UNC links can only resolve within the matching distribution', () => {
+  const original = process.env.WSL_DISTRO_NAME;
+  try {
+    process.env.WSL_DISTRO_NAME = 'Ubuntu';
+    assert.equal(sessionFilePath('//wsl.localhost/Ubuntu/home/u/video.webm', '/project', 'linux'), '/home/u/video.webm');
+    assert.throws(() => sessionFilePath('//wsl.localhost/Debian/home/u/video.webm', '/project', 'linux'), /其他 Windows\/WSL 环境/);
+    delete process.env.WSL_DISTRO_NAME;
+    assert.throws(() => sessionFilePath('//wsl.localhost/Ubuntu/home/u/video.webm', '/project', 'darwin'), /其他 Windows\/WSL 环境/);
+  } finally {
+    if (original === undefined) delete process.env.WSL_DISTRO_NAME; else process.env.WSL_DISTRO_NAME = original;
+  }
+});
