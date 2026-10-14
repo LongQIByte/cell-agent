@@ -63,11 +63,20 @@ export function normalizeItem(
           );
         }
       }
+      const text = texts.join('\n');
+      // Native automation prompts are persisted as userMessage items. Match
+      // only the complete envelope, never snippets inside ordinary messages.
+      const heartbeat = !item.clientId && !attachments.length && !images.length &&
+        /^\s*<heartbeat>\s*<automation_id>([^<>]+)<\/automation_id>\s*<current_time_iso>([^<>]+)<\/current_time_iso>\s*<instructions>([\s\S]*?)<\/instructions>\s*<\/heartbeat>\s*$/.exec(text);
+      if (heartbeat && Number.isFinite(Date.parse(heartbeat[2]))) return {
+        ...base, kind: 'activity', text: `自动化心跳 · ${heartbeat[1].trim()}`,
+        details: `来源：Codex 自动化 ${heartbeat[1].trim()}\n触发时间：${heartbeat[2]}\n\n${heartbeat[3].trim()}`,
+      };
       return {
         ...base,
         kind: 'user',
         clientId: item.clientId ?? undefined,
-        text: texts.join('\n'),
+        text,
         attachments,
       };
     }
