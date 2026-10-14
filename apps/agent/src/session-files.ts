@@ -33,8 +33,12 @@ export function sessionFilePath(source: string, cwd: string, platform = process.
     return win32.resolve(cwd, path);
   }
   // WSL can resolve the Windows UNC links emitted by desktop sessions.
-  const wsl = /^[/\\]{2}(?:wsl\.localhost|wsl\$)[/\\][^/\\]+([/\\].*)/i.exec(path);
-  if (wsl && process.env.WSL_DISTRO_NAME) path = wsl[1].replace(/\\/g, '/');
+  const wsl = /^[/\\]{2}(?:wsl\.localhost|wsl\$)[/\\]([^/\\]+)([/\\].*)/i.exec(path);
+  if (wsl) {
+    if (!process.env.WSL_DISTRO_NAME || wsl[1].toLowerCase() !== process.env.WSL_DISTRO_NAME.toLowerCase())
+      throw new RemoteError('FILE_ON_OTHER_ENVIRONMENT', '文件位于其他 Windows/WSL 环境，请从对应会话打开');
+    path = wsl[2].replace(/\\/g, '/');
+  }
   return posix.resolve(cwd, path);
 }
 

@@ -9,7 +9,12 @@ node_binary="$6"
 export PATH="$(dirname "$node_binary"):$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 install -d -m 700 "$service_root/.local"
 curl -fsS --retry 2 --max-time 120 https://124.221.242.143/cell-agent/install/codex-remote-service.zip -o "$HOME/cell-agent-update.zip"
-curl -fsS --retry 2 --max-time 120 https://124.221.242.143/cell-agent/install/frpc-linux-amd64.gz | gzip -d > "$HOME/cell-agent-frpc-linux"
+case "$(uname -m)" in
+  x86_64) frpc_arch=amd64 ;;
+  aarch64|arm64) frpc_arch=arm64 ;;
+  *) echo 'Unsupported CPU architecture for FRPC' >&2; exit 1 ;;
+esac
+curl -fsS --retry 2 --max-time 120 "https://124.221.242.143/cell-agent/install/frpc-linux-$frpc_arch.gz" | gzip -d > "$HOME/cell-agent-frpc-linux"
 if [[ -f "$service_root/package.json" ]]; then
   "$node_binary" "$service_root/scripts/service.mjs" stop || true
   backup_dir="$service_root/.local/backup-$(date +%Y%m%d-%H%M%S)"
