@@ -178,7 +178,7 @@ npm run test:browser   # 先启动 npm start；会调用本机真实 Codex
 
 ## 当前范围
 
-项目归属使用 Codex 原生 project API 的项目定义，并仅读取本机桌面明确记录的归属 metadata；不按工作目录推断归属，也不写迁移数据。当前客户端使用通信协议 2；旧正式 APK 需要重新安装新版，开发 APK 可通过 Metro 加载新的 JavaScript。
+项目归属使用 Codex 原生 project API 的项目定义，并仅读取本机桌面明确记录的归属 metadata；不按工作目录推断归属，也不写迁移数据。当前客户端使用通信协议 3；旧正式 APK 需要重新安装新版，开发 APK 可通过 Metro 加载新的 JavaScript。
 
 支持读取并继续这台机器保存的原生会话。Agent 启动一个独立的官方 App Server，流式事件覆盖通过该 Agent 执行的任务；其他桌面客户端独立运行的任务通过历史刷新查看，不承诺其跨进程实时事件。为保持会话记录一致，应避免桌面和手机同时向同一个会话发起任务。
 
